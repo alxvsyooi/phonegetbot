@@ -1,0 +1,10 @@
+settings.json
+accounts.json
+*.session
+*.session-journal
+*.tmp
+__pycache__/
+*.pyc
+bot.log
+bot.log.*
+.claude/

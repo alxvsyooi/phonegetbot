@@ -1,0 +1,32 @@
+{
+  "api_id": 0,
+  "api_hash": "ВАШ_API_HASH_С_my.telegram.org",
+  "bot_token": "ВСТАВЬТЕ_ТОКЕН_УПРАВЛЯЮЩЕГО_БОТА_ОТ_@BotFather",
+  "admin_ids": [123456789],
+  "default_card_interval": 3600,
+  "default_roulette_interval": 3600,
+  "good_phone_keywords": ["фантом", "phantom"],
+  "report_time": "00:00",
+  "payout_to": 0,
+  "payout_delay": 120,
+  "main_account_id": 0,
+  "trade": {
+    "command": "/trade {target}",
+    "step_timeout": 35,
+    "max_slots": 10,
+    "offer_marker": "предложение обмена",
+    "confirm_marker": "подтвердите обмен",
+    "added_marker": "добавлено",
+    "ready_label": "готовность",
+    "give_section_marker": "вы отдаёте",
+    "slots_label": "занято слотов",
+    "accept_button": "принять",
+    "ready_button": "готов",
+    "add_phone_button": "добавить телефон",
+    "working_phone_button": "рабочий телефон",
+    "add_several_button": "добавить несколько",
+    "add_one_button": "добавить 1",
+    "confirm_button": "подтвердить",
+    "skip_buttons": ["назад", "вернуться", "быстрый выбор", "закрыть", "отмена", "меню"]
+  }
+}
