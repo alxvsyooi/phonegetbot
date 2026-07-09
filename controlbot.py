@@ -30,6 +30,20 @@ def _btn(text: str, data: str) -> InlineKeyboardButton:
 # постоянная кнопка снизу экрана — жмёшь и сразу шлётся «/start», не нужно набирать
 _START_KEYBOARD = ReplyKeyboardMarkup([[KeyboardButton("/start")]], resize_keyboard=True)
 
+_WELCOME_TEXT = (
+    "👋 Привет! Я бот-помощник для игры <b>PhoneGet</b> в Telegram.\n\n"
+    "Что я умею — два независимых модуля, каждый включается отдельно:\n\n"
+    "🌾 <b>Фарм карточек</b> — сам забирает карточки, крутит рулетку, собирает "
+    "урожай с фермы и ежедневную награду, следит за магазином контейнеров.\n\n"
+    "📨 <b>Автоотправка</b> — шлёт любые сообщения любым ботам по расписанию, "
+    "или по короткой команде вроде «.trade»/«.pay», которую ты печатаешь в чате "
+    "с кем-то — я сам подставлю получателя и отправлю нужную команду.\n\n"
+    "🔐 Чтобы начать, я попрошу тебя войти в аккаунт (номер + код — как обычный "
+    "вход в Telegram). Это даёт полный доступ к аккаунту, поэтому добавляй сюда "
+    "только тот аккаунт, которым управляешь ты сам.\n\n"
+    "👇 Жми «📋 Мои аккаунты», чтобы добавить первый аккаунт."
+)
+
 
 class ControlBot:
     def __init__(self, settings: dict[str, Any], storage: Storage, manager: Manager) -> None:
@@ -61,8 +75,7 @@ class ControlBot:
             self.states.pop(m.from_user.id, None)
             # сообщение может нести только один тип клавиатуры — шлём два:
             # 1) закрепляем снизу постоянную кнопку «/start» (один раз хватит, дальше видна всегда)
-            await m.reply("⌨️ Кнопка быстрого /start закреплена снизу.",
-                          reply_markup=_START_KEYBOARD)
+            await m.reply(_WELCOME_TEXT, reply_markup=_START_KEYBOARD)
             # 2) сама панель — с инлайн-кнопками
             await m.reply("🤖 <b>Панель управления</b>", reply_markup=self._main_menu())
 
@@ -93,8 +106,6 @@ class ControlBot:
             mark = "🟢" if (w and w.running and acc.get("enabled", True)) else "🔴"
             rows.append([_btn(f"{mark} {acc.get('name')}", f"acc:{acc['id']}")])
         rows.append([_btn("➕ По номеру", "add_phone"), _btn("➕ Session", "add_session")])
-        if self._my_accounts(uid):
-            rows.append([_btn("☎️ Показать все номера", "allphones")])
         rows.append([_btn("⬅️ Назад", "home")])
         return InlineKeyboardMarkup(rows)
 
@@ -103,12 +114,27 @@ class ControlBot:
         en = acc.get("enabled", True)
         return InlineKeyboardMarkup([
             [_btn("⏸ Выключить" if en else "▶️ Включить", f"toggle:{aid}")],
-            [_btn("🎯 Получатели", f"targets:{aid}"), _btn("📨 Сообщения", f"msgs:{aid}")],
-            [_btn("⚙️ Автоматизация", f"autom:{aid}"), _btn("⏱ Интервалы", f"intervals:{aid}")],
-            [_btn("🧩 Задачи", f"tasks:{aid}"), _btn("▶️ Действия", f"actions:{aid}")],
+            [_btn("🌾 Фарм карточек", f"farm:{aid}"), _btn("📨 Автоотправка", f"autosend:{aid}")],
+            [_btn("📨 Сообщения", f"msgs:{aid}")],
             [_btn("✏️ Имя", f"rename:{aid}"), _btn("🗑 Удалить", f"del:{aid}")],
             [_btn("🔄 Обновить", f"acc:{aid}"), _btn("⬅️ Назад", "list")],
         ])
+
+    # ---------- 🌾 Фарм карточек (независимый модуль) ----------
+    def _farm_menu(self, acc: dict) -> InlineKeyboardMarkup:
+        aid = acc["id"]
+        fe = acc.get("farm_enabled", True)
+        return InlineKeyboardMarkup([
+            [_btn("⏸ Выключить фарм" if fe else "▶️ Включить фарм", f"tfarm:{aid}")],
+            [_btn("⚙️ Автоматизация", f"autom:{aid}"), _btn("⏱ Интервалы", f"intervals:{aid}")],
+            [_btn("🎯 Получатели", f"targets:{aid}")],
+            [_btn("▶️ Действия", f"actions:{aid}")],
+            [_btn("⬅️ Назад", f"acc:{aid}")],
+        ])
+
+    def _farm_text(self, acc: dict) -> str:
+        fe = "вкл ✅" if acc.get("farm_enabled", True) else "выкл ❌"
+        return f"🌾 <b>Фарм карточек</b> — {acc.get('name')}\nМодуль: {fe}"
 
     def _targets_menu(self, acc: dict) -> InlineKeyboardMarkup:
         aid = acc["id"]
@@ -118,8 +144,26 @@ class ControlBot:
             [_btn(f"🤝 Трейд -> {acc.get('trade_target') or 'не задано'}",
                   f"settradetarget:{aid}")],
             [_btn("👑 Сделать получателем для всех моих аккаунтов", f"copytargets:{aid}")],
+            [_btn("⬅️ Назад", f"farm:{aid}")],
+        ])
+
+    # ---------- 📨 Автоотправка (независимый модуль) ----------
+    def _autosend_menu(self, acc: dict) -> InlineKeyboardMarkup:
+        aid = acc["id"]
+        ae = acc.get("autosend_enabled", True)
+        sc = "вкл ✅" if acc.get("self_commands_enabled", True) else "выкл ❌"
+        return InlineKeyboardMarkup([
+            [_btn("⏸ Выключить автоотправку" if ae else "▶️ Включить автоотправку", f"tautosend:{aid}")],
+            [_btn("🧩 Мои задачи", f"tasks:{aid}")],
+            [_btn(f"💬 Команды .trade/.pay в личках: {sc}", f"tselfcmd:{aid}")],
             [_btn("⬅️ Назад", f"acc:{aid}")],
         ])
+
+    def _autosend_text(self, acc: dict) -> str:
+        ae = "вкл ✅" if acc.get("autosend_enabled", True) else "выкл ❌"
+        n = len(acc.get("tasks", []))
+        return (f"📨 <b>Автоотправка</b> — {acc.get('name')}\nМодуль: {ae}\n"
+                f"Задач настроено: {n}")
 
     def _messages_menu(self, acc: dict) -> InlineKeyboardMarkup:
         aid = acc["id"]
@@ -147,8 +191,7 @@ class ControlBot:
             [_btn(f"💸 Авто-вывод: {s('autopay_enabled')}", f"tpay:{aid}")],
             [_btn(f"🤝 Авто-трейд: {s('autotrade_enabled', False)}", f"ttrade:{aid}")],
             [_btn(f"📦 Магазин контейнеров: {s('containers_enabled', False)}", f"tcont:{aid}")],
-            [_btn(f"💬 Команды .trade/.pay в личках: {s('self_commands_enabled')}", f"tselfcmd:{aid}")],
-            [_btn("⬅️ Назад", f"acc:{aid}")],
+            [_btn("⬅️ Назад", f"farm:{aid}")],
         ])
 
     def _intervals_menu(self, acc: dict) -> InlineKeyboardMarkup:
@@ -157,7 +200,7 @@ class ControlBot:
             [_btn(f"⏱ Карточки: {acc.get('card_interval', 3600)}с", f"setcard:{aid}")],
             [_btn(f"⏱ Рулетка: {acc.get('roulette_interval', 3600)}с", f"setroul:{aid}")],
             [_btn(f"⏰ Майнинг (МСК): {acc.get('mining_time', '01:00')}", f"setmtime:{aid}")],
-            [_btn("⬅️ Назад", f"acc:{aid}")],
+            [_btn("⬅️ Назад", f"farm:{aid}")],
         ])
 
     def _actions_menu(self, acc: dict) -> InlineKeyboardMarkup:
@@ -166,8 +209,7 @@ class ControlBot:
             [_btn("⛏ Собрать майнинг сейчас", f"mine:{aid}")],
             [_btn("🔄 Слить телефоны (по 🎯 получателю трейда)", f"exch:{aid}")],
             [_btn("📦 Проверить магазин контейнеров", f"checkcont:{aid}")],
-            [_btn("☎️ Показать номер телефона", f"phone:{aid}")],
-            [_btn("⬅️ Назад", f"acc:{aid}")],
+            [_btn("⬅️ Назад", f"farm:{aid}")],
         ])
 
     @staticmethod
@@ -183,7 +225,7 @@ class ControlBot:
             title = t.get("name") or t.get("text") or "задача"
             rows.append([_btn(f"{mk} {title[:24]} ({self._task_sched(t)})", f"task:{aid}:{t['id']}")])
         rows.append([_btn("➕ Добавить задачу", f"addtask:{aid}")])
-        rows.append([_btn("⬅️ Назад", f"acc:{aid}")])
+        rows.append([_btn("⬅️ Назад", f"autosend:{aid}")])
         return InlineKeyboardMarkup(rows)
 
     def _task_menu(self, acc: dict, t: dict) -> InlineKeyboardMarkup:
@@ -220,11 +262,8 @@ class ControlBot:
         lines = [
             f"<b>{acc.get('name')}</b>  (id <code>{acc['id']}</code>)",
             f"Статус: {w.status if w else 'остановлен'}",
-            f"Общий: {fl('enabled')} | 🃏 {fl('card_enabled')} | 🎰 {fl('roulette_enabled')} | "
-            f"⛏ {fl('mining_enabled')} | 🎁 {fl('daily_reward_enabled')}",
-            f"💸 авто-вывод: {fl('autopay_enabled')} -> {acc.get('payout_target') or 'не задано'}",
-            f"🤝 авто-трейд: {fl('autotrade_enabled', False)} -> {acc.get('trade_target') or 'не задано'}",
-            f"💬 команды .trade/.pay в личках: {fl('self_commands_enabled')}",
+            f"Общий: {fl('enabled')}  |  🌾 Фарм: {fl('farm_enabled')}  |  "
+            f"📨 Автоотправка: {fl('autosend_enabled')}",
             "",
         ]
         if w:
@@ -270,9 +309,6 @@ class ControlBot:
                 self.states[uid] = {"flow": "add", "method": "session", "step": "api_id", "data": {}}
                 await q.message.edit_text("➕ Добавление по session string.\nОтправь <b>api_id</b>:")
                 return await q.answer()
-            if data == "allphones":
-                await self._start_all_phones(q, uid)
-                return
 
             # дальше всё про конкретный аккаунт — проверяем владение
             aid = int(data.split(":")[1])
@@ -282,6 +318,10 @@ class ControlBot:
 
             if data.startswith("acc:"):
                 await self._show(q, acc)
+            elif data.startswith("farm:"):
+                await q.message.edit_text(self._farm_text(acc), reply_markup=self._farm_menu(acc))
+            elif data.startswith("autosend:"):
+                await q.message.edit_text(self._autosend_text(acc), reply_markup=self._autosend_menu(acc))
             elif data.startswith("autom:"):
                 await q.message.edit_text(f"⚙️ Автоматизация — <b>{acc.get('name')}</b>",
                                           reply_markup=self._automation_menu(acc))
@@ -321,7 +361,11 @@ class ControlBot:
                 await q.message.edit_text(f"🎯 Получатели — <b>{acc.get('name')}</b>",
                                           reply_markup=self._targets_menu(acc))
             elif data.startswith("toggle:"):
-                await self._toggle(q, acc, "enabled")
+                await self._toggle(q, acc, "enabled", redisplay="account")
+            elif data.startswith("tfarm:"):
+                await self._toggle(q, acc, "farm_enabled", redisplay="farm")
+            elif data.startswith("tautosend:"):
+                await self._toggle(q, acc, "autosend_enabled", redisplay="autosend")
             elif data.startswith("tcard:"):
                 await self._toggle(q, acc, "card_enabled")
             elif data.startswith("troul:"):
@@ -337,7 +381,7 @@ class ControlBot:
             elif data.startswith("tcont:"):
                 await self._toggle(q, acc, "containers_enabled")
             elif data.startswith("tselfcmd:"):
-                await self._toggle(q, acc, "self_commands_enabled")
+                await self._toggle(q, acc, "self_commands_enabled", redisplay="autosend")
             elif data.startswith("setcard:"):
                 self._ask(uid, aid, "card_interval")
                 await q.message.edit_text("Отправь интервал карточек в секундах (>=10):")
@@ -356,8 +400,6 @@ class ControlBot:
                 await self._start_trade(q, aid)
             elif data.startswith("checkcont:"):
                 await self._check_containers(q, aid)
-            elif data.startswith("phone:"):
-                await self._start_show_phone(q, aid)
             elif data.startswith("del:"):
                 await q.message.edit_text(
                     "Точно удалить аккаунт?",
@@ -413,7 +455,7 @@ class ControlBot:
     def _ask(self, uid: int, aid: int, field: str) -> None:
         self.states[uid] = {"flow": "set", "field": field, "acc_id": aid}
 
-    async def _toggle(self, q: CallbackQuery, acc: dict, field: str) -> None:
+    async def _toggle(self, q: CallbackQuery, acc: dict, field: str, redisplay: str = "automation") -> None:
         default = False if field in ("autotrade_enabled", "containers_enabled") else True
         acc[field] = not acc.get(field, default)
         self.storage.save()
@@ -422,8 +464,13 @@ class ControlBot:
                 await self.manager.start_account(acc["id"])
             else:
                 await self.manager.stop_account(acc["id"])
+        if redisplay == "account":
             await self._show(q, acc)
-        else:
+        elif redisplay == "farm":
+            await q.message.edit_text(self._farm_text(acc), reply_markup=self._farm_menu(acc))
+        elif redisplay == "autosend":
+            await q.message.edit_text(self._autosend_text(acc), reply_markup=self._autosend_menu(acc))
+        else:  # "automation" — фарм-подтумблеры (карточки/рулетка/майнинг/…)
             await q.message.edit_text(f"⚙️ Автоматизация — <b>{acc.get('name')}</b>",
                                       reply_markup=self._automation_menu(acc))
 
@@ -452,54 +499,6 @@ class ControlBot:
         acc = self.storage.get(aid)
         await self._safe_edit(q, self._account_text(acc) + f"\n\n📦 {w.last_container}",
                               self._account_menu(acc))
-
-    async def _start_show_phone(self, q: CallbackQuery, aid: int) -> None:
-        w = self.manager.workers.get(aid)
-        if not w or not w.running:
-            return await q.answer("Аккаунт не запущен", show_alert=True)
-        await q.answer("⏳ Запрашиваю у Telegram...")
-        asyncio.create_task(self._run_show_phone(q, aid, w))
-
-    async def _run_show_phone(self, q: CallbackQuery, aid: int, w) -> None:
-        info = await w.get_account_info()
-        acc = self.storage.get(aid)
-        text = f"☎️ <b>{acc.get('name')}</b>\n\n{self._format_phone_info(info)}"
-        await self._safe_edit(q, text, self._actions_menu(acc))
-
-    @staticmethod
-    def _format_phone_info(info: dict | None) -> str:
-        if not info:
-            return "⚠️ не удалось получить (аккаунт не запущен)"
-        if info.get("error"):
-            return f"⚠️ ошибка: {info['error']}"
-        name = " ".join(filter(None, [info.get("first_name"), info.get("last_name")])) or "—"
-        uname = f"@{info['username']}" if info.get("username") else "—"
-        return (
-            f"Телефон: <code>+{info.get('phone') or '—'}</code>\n"
-            f"Имя: {name}\n"
-            f"Username: {uname}\n"
-            f"id: <code>{info.get('id')}</code>"
-            f"{' | Premium ⭐' if info.get('is_premium') else ''}"
-        )
-
-    async def _start_all_phones(self, q: CallbackQuery, uid: int) -> None:
-        accs = [a for a in self._my_accounts(uid) if self.manager.workers.get(a["id"])
-                and self.manager.workers[a["id"]].running]
-        if not accs:
-            return await q.answer("Нет запущенных аккаунтов", show_alert=True)
-        await q.answer("⏳ Запрашиваю номера у Telegram...")
-        asyncio.create_task(self._run_all_phones(q, uid, accs))
-
-    async def _run_all_phones(self, q: CallbackQuery, uid: int, accs: list[dict]) -> None:
-        lines = ["☎️ <b>Номера телефонов моих аккаунтов</b>", ""]
-        for acc in accs:
-            w = self.manager.workers.get(acc["id"])
-            info = await w.get_account_info() if w else None
-            if info and not info.get("error") and info.get("phone"):
-                lines.append(f"• {acc.get('name')}: <code>+{info['phone']}</code>")
-            else:
-                lines.append(f"• {acc.get('name')}: ⚠️ не удалось получить")
-        await self._safe_edit(q, "\n".join(lines), self._accounts_menu(uid))
 
     async def _start_trade(self, q: CallbackQuery, aid: int) -> None:
         w = self.manager.workers.get(aid)
@@ -725,5 +724,5 @@ class ControlBot:
         await m.reply(
             f"✅ Аккаунт «{acc['name']}» добавлен и запущен.\n"
             f"Чтобы работали авто-вывод и авто-трейд, задай получателей: "
-            f"карточка аккаунта → 🎯 Получатели.",
+            f"🌾 Фарм карточек → 🎯 Получатели.",
             reply_markup=self._account_menu(acc))

@@ -99,6 +99,9 @@ ACCOUNT_DEFAULTS: dict[str, Any] = {
     "payout_target": "",    # получатель /pay — @username или id, задаёт сам пользователь
     "trade_target": "",     # получатель трейда — @username или id, задаёт сам пользователь
     "enabled": True,
+    # два НЕЗАВИСИМЫХ модуля — каждый можно включить/выключить отдельно от другого
+    "farm_enabled": True,       # 🌾 Фарм карточек: карточки/рулетка/майнинг/контейнеры/вывод/трейд
+    "autosend_enabled": True,   # 📨 Автоотправка: задачи по расписанию + .trade/.pay из личек
     "card_enabled": True,
     "roulette_enabled": True,
     "mining_enabled": True,

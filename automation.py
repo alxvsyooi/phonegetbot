@@ -1,150 +1,43 @@
-"""Воркер одного аккаунта: карточки, рулетка, майнинг, вывод очков, примитивы трейда."""
+"""Базовый воркер аккаунта: подключение к Telegram, общие примитивы обмена
+сообщениями, статистика, лог последних сообщений (виден только владельцу).
+
+Игровая автоматизация живёт в farm.py (FarmModule) — карточки/рулетка/майнинг/
+контейнеры/вывод/трейд. Автоотправка живёт в autosend.py (AutosendModule) —
+произвольные задачи по расписанию + «.trade»/«.pay» из личек. Модули НЕЗАВИСИМЫ:
+каждый включается/выключается своим тумблером (farm_enabled / autosend_enabled)
+и живёт в своих файлах/хендлерах, не пересекаясь друг с другом.
+
+Этот файл сознательно не читает контакты, историю чужой переписки и номер
+телефона аккаунта — только то, что нужно для игровой логики и автоотправки
+(ответы ботов, свои же сообщения).
+"""
 from __future__ import annotations
 
 import asyncio
 import html
-import re
 import time
 from collections import deque
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from pyrogram import Client, filters
 from pyrogram.handlers import MessageHandler, EditedMessageHandler
 
-from storage import (
-    CARDS_BOT, ROULETTE_BOT,
-    CARD_WORD, ROULETTE_WORD, ROULETTE_BUTTON,
-    MINING_WORD, MINING_BUTTON, MINING_HOUR, MINING_MINUTE,
-    BALANCE_WORD, PAY_CONFIRM_BUTTON, CONTAINER_WORD,
-    DAILY_REWARD_WORD, DAILY_REWARD_BUTTON,
-)
+from storage import CARDS_BOT
+from common import MSK, parse_hhmm, seconds_until_msk, fmt_duration, clock, chat_label, msg_preview
+from farm import FarmModule
+from autosend import AutosendModule
 
-MSK = timezone(timedelta(hours=3))
-BUFFER_SEC = 5  # буфер к кулдауну, чтобы не упереться ровно в секунду
 MSG_LOG_SIZE = 30  # сколько последних сообщений держим в памяти на аккаунт
 
-# "через 1 ч 23 мин 45 сек", "через 59 мин", "через 12 сек"
-_TIME_RE = re.compile(
-    r"через\s*(?:(\d+)\s*ч[а-я.]*)?\s*(?:(\d+)\s*м[а-я.]*)?\s*(?:(\d+)\s*с[а-я.]*)?",
-    re.IGNORECASE,
-)
-_POINTS_RE = re.compile(r"точки\D*?(\d[\d\s.,]*)", re.IGNORECASE)
-
-# "через 3 дн. 5 ч. 10 мин." (магазин контейнеров — с днями, без секунд)
-_SHOP_TIME_RE = re.compile(
-    r"через\s*(?:(\d+)\s*дн[а-я.]*)?\s*(?:(\d+)\s*ч[а-я.]*)?\s*(?:(\d+)\s*мин[а-я.]*)?",
-    re.IGNORECASE,
-)
+# main.py использует эти имена как `from automation import MSK, _parse_hhmm`
+_parse_hhmm = parse_hhmm
+_seconds_until_msk = seconds_until_msk
 
 
-def parse_shop_cooldown(text: str | None) -> int | None:
-    if not text:
-        return None
-    m = _SHOP_TIME_RE.search(text)
-    if not m:
-        return None
-    d, h, mi = (int(x) if x else 0 for x in m.groups())
-    total = d * 86400 + h * 3600 + mi * 60
-    return total or None
+class _WorkerBase:
+    """Подключение к Telegram + общие примитивы. Сам по себе не содержит ни
+    игровой логики, ни автоотправки — это в FarmModule/AutosendModule ниже."""
 
-
-# ---------- парсеры ----------
-def parse_cooldown(text: str | None) -> int | None:
-    if not text:
-        return None
-    m = _TIME_RE.search(text)
-    if not m:
-        return None
-    h, mi, s = (int(x) if x else 0 for x in m.groups())
-    total = h * 3600 + mi * 60 + s
-    return total or None
-
-
-def parse_points(text: str | None) -> int | None:
-    if not text:
-        return None
-    m = _POINTS_RE.search(text)
-    if not m:
-        return None
-    digits = re.sub(r"\D", "", m.group(1))
-    return int(digits) if digits else None
-
-
-def is_phone_won(text: str | None) -> bool:
-    return bool(text) and "выпал телефон" in text.lower()
-
-
-def _contains_any(text: str | None, keywords: list[str]) -> bool:
-    if not text:
-        return False
-    low = text.lower()
-    return any(k in low for k in keywords)
-
-
-def _parse_hhmm(value: str | None) -> tuple[int, int]:
-    if value:
-        m = re.match(r"^\s*(\d{1,2})[:.\s](\d{1,2})\s*$", value)
-        if m:
-            h, mi = int(m.group(1)), int(m.group(2))
-            if 0 <= h < 24 and 0 <= mi < 60:
-                return h, mi
-    return MINING_HOUR, MINING_MINUTE
-
-
-def _seconds_until_msk(hour: int, minute: int) -> float:
-    now = datetime.now(MSK)
-    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if target <= now:
-        target += timedelta(days=1)
-    return (target - now).total_seconds()
-
-
-def _fmt(seconds: int) -> str:
-    seconds = max(0, int(seconds))
-    h, rem = divmod(seconds, 3600)
-    m, s = divmod(rem, 60)
-    parts = []
-    if h:
-        parts.append(f"{h}ч")
-    if m:
-        parts.append(f"{m}м")
-    parts.append(f"{s}с")
-    return " ".join(parts)
-
-
-def _clock() -> str:
-    return time.strftime("%H:%M:%S")
-
-
-def _today() -> str:
-    return datetime.now(MSK).strftime("%d.%m")
-
-
-def _chat_label(chat) -> str:
-    uname = getattr(chat, "username", None)
-    if uname:
-        return f"@{uname}"
-    title = getattr(chat, "title", None)
-    if title:
-        return title
-    first = getattr(chat, "first_name", None)
-    if first:
-        return first
-    return str(getattr(chat, "id", "чат"))
-
-
-def _msg_preview(message) -> str:
-    text = getattr(message, "text", None) or getattr(message, "caption", None)
-    if text:
-        return text
-    media = getattr(message, "media", None)
-    if media:
-        return f"[{str(media).rsplit('.', 1)[-1].lower()}]"
-    return "[сообщение]"
-
-
-class AccountWorker:
     def __init__(
         self,
         account: dict[str, Any],
@@ -170,7 +63,7 @@ class AccountWorker:
         self._trade_mode = False
         self._trade_queue: asyncio.Queue | None = None
         self._task_next: dict[int, float] = {}   # tid -> время следующего запуска
-        self.recent_messages: deque = deque(maxlen=MSG_LOG_SIZE)  # лог всех сообщений аккаунта
+        self.recent_messages: deque = deque(maxlen=MSG_LOG_SIZE)  # лог сообщений (виден владельцу)
 
         now = 0.0
         self.card_next_ts = now
@@ -231,17 +124,17 @@ class AccountWorker:
         bot_filter = filters.incoming & filters.bot
         self.client.add_handler(MessageHandler(self._on_message, bot_filter))
         self.client.add_handler(EditedMessageHandler(self._on_message, bot_filter))
-        # свои же сообщения в личках («.trade», «.pay 505050») -> команда боту карточек.
+        # автоотправка: свои же сообщения в личках («.trade», «.pay 505050») — модуль autosend.py.
         # Отдельная группа, чтобы не пересекаться с обработкой ответов ботов.
         self.client.add_handler(
             MessageHandler(self._on_self_command, filters.me & filters.private), group=1
         )
-        # постоянный лог последних сообщений на аккаунте (для кнопки «📨 Сообщения»),
+        # лог последних сообщений (для кнопки «📨 Сообщения», виден только владельцу),
         # отдельная группа — просто наблюдатель, ничего не решает и не блокирует
         self.client.add_handler(MessageHandler(self._on_any_message, filters.all), group=2)
         await self.client.start()
 
-        try:  # запомним tg_id/username (нужно для трейда и пометки главного)
+        try:  # запомним tg_id/username (нужно для трейда и определения владельца)
             me = await self.client.get_me()
             if self.account.get("tg_id") != me.id or not self.account.get("username"):
                 self.account["tg_id"] = me.id
@@ -253,14 +146,13 @@ class AccountWorker:
 
         self.running = True
         self.status = "работает"
-        self._tasks = [
-            asyncio.create_task(self._card_loop()),
-            asyncio.create_task(self._roulette_loop()),
-            asyncio.create_task(self._mining_loop()),
-            asyncio.create_task(self._container_loop()),
-            asyncio.create_task(self._tasks_loop()),
-        ]
+        self._tasks = [asyncio.create_task(coro) for coro in self._loops()]
         print(f"[{self.name}] запущен")
+
+    def _loops(self):
+        """Список корутин фоновых циклов. FarmModule/AutosendModule добавляют
+        свои через кооперативный super()._loops() + [...]."""
+        return []
 
     async def stop(self) -> None:
         self.running = False
@@ -292,52 +184,16 @@ class AccountWorker:
         if fut and not fut.done():
             fut.set_result(message)
 
-    async def _on_self_command(self, _client, message) -> None:
-        """Своё сообщение вида «.trade» / «.pay 505050» в личке с кем-то -> шлём
-        соответствующую команду боту карточек (получатель = собеседник этой личке)
-        и, если бот попросит подтверждение кнопкой «Подтвердить», жмём её сами."""
-        if not self.account.get("enabled", True) or not self.account.get(
-            "self_commands_enabled", True
-        ):
-            return
-        if self._trade_mode:
-            self.last_self_cmd = "идёт трейд — попробуй чуть позже"
-            return
-        text = (message.text or "").strip()
-        if not text.startswith("."):
-            return
-        chat_uname = (getattr(message.chat, "username", "") or "")
-        if chat_uname.lower() in (CARDS_BOT.lower(), ROULETTE_BOT.lower()):
-            return  # не трогаем переписку с самими игровыми ботами
-        parts = text[1:].split(maxsplit=1)
-        if not parts:
-            return
-        verb = parts[0].lower()
-        arg = parts[1].strip() if len(parts) > 1 else ""
-        tmpl = self.self_commands_cfg.get(verb)
-        if not tmpl:
-            return
-        target = f"@{chat_uname}" if chat_uname else str(message.chat.id)
-        cmd = tmpl.replace("{target}", target).replace("{arg}", arg)
-        who = chat_uname or message.chat.id
-        try:
-            reply = await self._send_and_wait(CARDS_BOT, cmd, timeout=15)
-            confirmed = " + подтверждено ✅" if await self._try_click(
-                reply, PAY_CONFIRM_BUTTON
-            ) else ""
-            self.last_self_cmd = f"✅ .{verb} ({who}) -> {cmd}{confirmed} ({_clock()})"
-        except Exception as e:  # noqa: BLE001
-            self.last_self_cmd = f"ошибка .{verb}: {e}"
-
     async def _on_any_message(self, _client, message) -> None:
         """Наблюдатель: складывает КАЖДОЕ сообщение (входящее и своё) в кольцевой
-        буфер для кнопки «📨 Сообщения». Ничего не решает, ничему не мешает."""
+        буфер для кнопки «📨 Сообщения». Видно только владельцу аккаунта в боте.
+        Ничего не решает, ничему не мешает."""
         try:
             self.recent_messages.append({
-                "time": _clock(),
+                "time": clock(),
                 "dir": "out" if getattr(message, "outgoing", False) else "in",
-                "chat": html.escape(_chat_label(message.chat)),
-                "text": html.escape(_msg_preview(message))[:120],
+                "chat": html.escape(chat_label(message.chat)),
+                "text": html.escape(msg_preview(message))[:120],
             })
         except Exception:
             pass
@@ -373,7 +229,7 @@ class AccountWorker:
             self._pending.pop(username.lower(), None)
             return None
 
-    # ---------- примитивы режима трейда ----------
+    # ---------- примитивы режима трейда (использует farm.py / trade.py) ----------
     def enter_trade_mode(self) -> None:
         self._trade_queue = asyncio.Queue()
         self._trade_mode = True
@@ -425,379 +281,16 @@ class AccountWorker:
         except Exception:
             return False
 
-    # ---------- цикл карточек ----------
-    async def _card_loop(self) -> None:
-        while self.running:
-            try:
-                if self._trade_mode:
-                    await asyncio.sleep(2)
-                    continue
-                if not self.account.get("enabled", True) or not self.account.get("card_enabled", True):
-                    await asyncio.sleep(20)
-                    continue
-                now = time.time()
-                if now < self.card_next_ts:
-                    await asyncio.sleep(min(30, self.card_next_ts - now))
-                    continue
-
-                reply = await self._send_and_wait(CARDS_BOT, CARD_WORD)
-                text = getattr(reply, "text", None) or getattr(reply, "caption", None)
-                cd = parse_cooldown(text)
-                default = int(self.account.get("card_interval", 3600))
-                self.card_next_ts = time.time() + (cd if cd is not None else default) + BUFFER_SEC
-
-                if is_phone_won(text):
-                    self._bump("phones")
-                    good = _contains_any(text, self.good_keywords)
-                    if good:
-                        self._bump("good_phones")
-                    label = (text or "телефон").split("\n")[0][:60]
-                    self.last_card = f"🎉 {label}{' ⭐' if good else ''} ({_clock()})"
-                elif cd is not None:
-                    self.last_card = f"⏳ кулдаун {_fmt(cd)} ({_clock()})"
-                elif reply is None:
-                    self.last_card = f"⚠️ нет ответа ({_clock()})"
-                else:
-                    self.last_card = f"отправлено ({_clock()})"
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:  # noqa: BLE001
-                self.last_card = f"ошибка: {e}"
-                self.card_next_ts = time.time() + 60
-                await asyncio.sleep(5)
-
-    # ---------- цикл рулетки ----------
-    async def _roulette_loop(self) -> None:
-        while self.running:
-            try:
-                if self._trade_mode:
-                    await asyncio.sleep(2)
-                    continue
-                if not self.account.get("enabled", True) or not self.account.get("roulette_enabled", True):
-                    await asyncio.sleep(20)
-                    continue
-                now = time.time()
-                if now < self.roulette_next_ts:
-                    await asyncio.sleep(min(30, self.roulette_next_ts - now))
-                    continue
-
-                reply = await self._send_and_wait(ROULETTE_BOT, ROULETTE_WORD)
-                text = getattr(reply, "text", None) or getattr(reply, "caption", None)
-                default = int(self.account.get("roulette_interval", 3600))
-
-                clicked = await self._try_click(reply, ROULETTE_BUTTON)
-                if clicked:
-                    self._bump("roulette")
-                    result = await self._wait_next(ROULETTE_BOT, timeout=12)
-                    rtext = (getattr(result, "text", None)
-                             or getattr(result, "caption", None) or text)
-                    cd = parse_cooldown(rtext)
-                    delay = cd if cd is not None else default
-                    self.last_roulette = f"🎰 крутили, кулдаун {_fmt(delay)} ({_clock()})"
-                else:
-                    cd = parse_cooldown(text)
-                    delay = cd if cd is not None else default
-                    self.last_roulette = (f"⚠️ нет ответа ({_clock()})" if reply is None
-                                          else f"⏳ кулдаун {_fmt(delay)} ({_clock()})")
-                self.roulette_next_ts = time.time() + delay + BUFFER_SEC
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:  # noqa: BLE001
-                self.last_roulette = f"ошибка: {e}"
-                self.roulette_next_ts = time.time() + 60
-                await asyncio.sleep(5)
-
-    # ---------- цикл майнинга ----------
-    async def _mining_loop(self) -> None:
-        """Раз в сутки в заданное по МСК время. Опрос раз в 20с — время меняется на лету."""
-        last_fired = None
-        while self.running:
-            try:
-                if self._trade_mode:
-                    await asyncio.sleep(2)
-                    continue
-                hour, minute = _parse_hhmm(self.account.get("mining_time"))
-                self.mining_next_ts = time.time() + _seconds_until_msk(hour, minute)
-
-                now = datetime.now(MSK)
-                due = now.hour == hour and now.minute == minute and last_fired != now.date()
-                if due and self.account.get("enabled", True):
-                    last_fired = now.date()
-                    if self.account.get("mining_enabled", True):
-                        clicked = await self.collect_mining()
-                        if clicked and self.account.get("autopay_enabled", True):
-                            await self._payout()
-                        if clicked and self.account.get("autotrade_enabled", False) and self.trade_runner:
-                            try:
-                                await self.trade_runner(self.id)
-                            except Exception as e:  # noqa: BLE001
-                                self.last_exchange = f"ошибка авто-трейда: {e}"
-                    if self.account.get("daily_reward_enabled", True):
-                        await self.collect_daily_reward()
-                await asyncio.sleep(20)
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:  # noqa: BLE001
-                self.last_mining = f"ошибка: {e}"
-                await asyncio.sleep(20)
-
-    # ---------- магазин контейнеров ----------
-    async def _container_loop(self) -> None:
-        """Раз в кулдаун шлёт «Магазин контейнеров». Если ответ — стандартное
-        «раскуплены, след. через X» — просто ждёт это время. Если ответ ДРУГОЙ
-        (контейнеры есть в наличии / нужна капча) — оповещает владельца и ждёт
-        unknown_retry перед следующей попыткой."""
-        while self.running:
-            try:
-                if self._trade_mode:
-                    await asyncio.sleep(2)
-                    continue
-                if not self.account.get("enabled", True) or not self.account.get(
-                    "containers_enabled", False
-                ):
-                    await asyncio.sleep(20)
-                    continue
-                now = time.time()
-                if now < self.container_next_ts:
-                    await asyncio.sleep(min(30, self.container_next_ts - now))
-                    continue
-                await self.check_containers()
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:  # noqa: BLE001
-                self.last_container = f"ошибка: {e}"
-                self.container_next_ts = time.time() + 60
-                await asyncio.sleep(5)
-
-    async def check_containers(self) -> str:
-        """«Магазин контейнеров» -> распознать «раскуплены, след. через X» и ждать,
-        либо (неожиданный ответ) оповестить владельца. Используется циклом и
-        кнопкой «Проверить сейчас». Возвращает last_container."""
-        if not self.client or not self.running:
-            self.last_container = "аккаунт не запущен"
-            return self.last_container
-        cfg = self.container_cfg
-        bot = cfg.get("bot") or CARDS_BOT
-        marker = cfg.get("sold_out_marker", "раскуплены")
-        unknown_retry = int(cfg.get("unknown_retry", 600))
-        try:
-            reply = await self._send_and_wait(bot, CONTAINER_WORD)
-            text = getattr(reply, "text", None) or getattr(reply, "caption", None)
-            if text and marker.lower() in text.lower():
-                cd = parse_shop_cooldown(text)
-                delay = cd if cd is not None else unknown_retry
-                self.container_next_ts = time.time() + delay + BUFFER_SEC
-                self.last_container = f"⏳ раскуплены, след. через {_fmt(delay)} ({_clock()} {_today()})"
-            elif reply is None:
-                self.container_next_ts = time.time() + unknown_retry
-                self.last_container = f"⚠️ нет ответа ({_clock()})"
-            else:
-                # неожиданный ответ: возможно есть в наличии / нужна капча — зовём владельца
-                self.container_next_ts = time.time() + unknown_retry
-                self.last_container = f"🚨 неожиданный ответ, оповестил владельца ({_clock()} {_today()})"
-                await self._notify_owner_captcha(cfg, text)
-        except Exception as e:  # noqa: BLE001
-            self.container_next_ts = time.time() + 60
-            self.last_container = f"ошибка: {e}"
-        return self.last_container
-
-    async def _notify_owner_captcha(self, cfg: dict, shop_text: str | None) -> None:
-        owner_id = self.account.get("owner_id")
-        if not owner_id:
-            return
-        alert = cfg.get("captcha_alert_text", "КАПЧА")
-        preview = f"\n\n«{shop_text[:200]}»" if shop_text else ""
-        try:
-            await self.client.send_message(owner_id, f"{alert} — «{self.name}»{preview}")
-        except Exception as e:  # noqa: BLE001
-            print(f"[{self.name}] не удалось оповестить владельца: {e}")
-
-    # ---------- действия ----------
-    async def get_account_info(self) -> dict[str, Any] | None:
-        """Читает у Telegram актуальные данные аккаунта (в т.ч. номер телефона)
-        через уже авторизованную сессию — SMS/повторный вход не нужны."""
-        if not self.client or not self.running:
-            return None
-        try:
-            me = await self.client.get_me()
-            return {
-                "phone": me.phone_number,
-                "id": me.id,
-                "username": me.username,
-                "first_name": me.first_name,
-                "last_name": me.last_name,
-                "is_premium": bool(getattr(me, "is_premium", False)),
-            }
-        except Exception as e:  # noqa: BLE001
-            return {"error": f"{type(e).__name__}: {e}"}
-
-    async def collect_mining(self) -> bool:
-        """«Тмайнинг» -> «Снять деньги с фермы». True при успехе."""
-        if not self.client or not self.running:
-            self.last_mining = "аккаунт не запущен"
-            return False
-        if self._trade_mode:
-            self.last_mining = "идёт трейд — позже"
-            return False
-        try:
-            reply = await self._send_and_wait(CARDS_BOT, MINING_WORD)
-            clicked = await self._try_click(reply, MINING_BUTTON)
-            if clicked:
-                self._bump("mining")
-                self.last_mining = f"💰 снято с фермы ({_clock()} {_today()})"
-            elif reply is None:
-                self.last_mining = f"⚠️ нет ответа ({_clock()} {_today()})"
-            else:
-                self.last_mining = f"⚠️ кнопка не найдена — рано/уже собрано ({_clock()} {_today()})"
-            return clicked
-        except Exception as e:  # noqa: BLE001
-            self.last_mining = f"ошибка: {e}"
-            return False
-
-    async def collect_daily_reward(self) -> bool:
-        """«Ежедневная награда» -> «Забрать». True при успехе. Собирается вместе
-        с майнингом (тот же триггер по времени), но включается отдельным тогглом."""
-        if not self.client or not self.running:
-            self.last_daily = "аккаунт не запущен"
-            return False
-        if self._trade_mode:
-            self.last_daily = "идёт трейд — позже"
-            return False
-        try:
-            reply = await self._send_and_wait(CARDS_BOT, DAILY_REWARD_WORD)
-            clicked = await self._try_click(reply, DAILY_REWARD_BUTTON)
-            if clicked:
-                self._bump("daily")
-                self.last_daily = f"🎁 забрана ({_clock()} {_today()})"
-            elif reply is None:
-                self.last_daily = f"⚠️ нет ответа ({_clock()} {_today()})"
-            else:
-                self.last_daily = f"⚠️ кнопка не найдена — уже забрана? ({_clock()} {_today()})"
-            return clicked
-        except Exception as e:  # noqa: BLE001
-            self.last_daily = f"ошибка: {e}"
-            return False
-
-    async def _payout(self) -> None:
-        """«такк» -> «Точки: N» -> /pay <получатель> N -> Подтвердить.
-        Получатель — payout_target, который пользователь задал сам (@username или id)."""
-        try:
-            target = (self.account.get("payout_target") or "").strip()
-            if not target:
-                self.last_payout = "⚠️ получатель вывода не задан (🎯 Получатели)"
-                return
-            await asyncio.sleep(max(0, int(self.payout_delay)))
-            if not self.running:
-                return
-            bal = await self._send_and_wait(CARDS_BOT, BALANCE_WORD)
-            amount = parse_points(getattr(bal, "text", None) or getattr(bal, "caption", None))
-            if not amount or amount <= 0:
-                self.last_payout = f"нет очков для вывода ({_clock()})"
-                return
-            pay = await self._send_and_wait(CARDS_BOT, f"/pay {target} {amount}")
-            if await self._try_click(pay, PAY_CONFIRM_BUTTON):
-                self._bump("paid", amount)
-                self.last_payout = f"💸 выведено {amount} -> {target} ({_clock()} {_today()})"
-            elif pay is None:
-                self.last_payout = f"⚠️ нет ответа на /pay ({_clock()})"
-            else:
-                self.last_payout = f"⚠️ кнопка Подтвердить не найдена ({_clock()})"
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:  # noqa: BLE001
-            self.last_payout = f"ошибка вывода: {e}"
-
-    # ---------- произвольные задачи пользователя ----------
-    def _task_init_next(self, task: dict) -> float:
-        if task.get("mode") == "daily":
-            h, m = _parse_hhmm(task.get("time"))
-            return time.time() + _seconds_until_msk(h, m)
-        return time.time()  # интервальная: запустить сразу
-
-    def _task_after_next(self, task: dict) -> float:
-        if task.get("mode") == "daily":
-            h, m = _parse_hhmm(task.get("time"))
-            return time.time() + _seconds_until_msk(h, m)
-        return time.time() + max(10, int(task.get("interval", 3600)))
-
-    async def _tasks_loop(self) -> None:
-        while self.running:
-            try:
-                if self._trade_mode or not self.account.get("enabled", True):
-                    await asyncio.sleep(15)
-                    continue
-                now = time.time()
-                for task in list(self.account.get("tasks", [])):
-                    if not task.get("enabled", True):
-                        continue
-                    tid = task.get("id")
-                    nxt = self._task_next.get(tid)
-                    if nxt is None:
-                        nxt = self._task_init_next(task)
-                        self._task_next[tid] = nxt
-                    if now >= nxt:
-                        await self._run_task(task)
-                        self._task_next[tid] = self._task_after_next(task)
-                await asyncio.sleep(15)
-            except asyncio.CancelledError:
-                raise
-            except Exception:  # noqa: BLE001
-                await asyncio.sleep(15)
-
-    async def _run_task(self, task: dict) -> bool:
-        bot = (task.get("bot") or "").lstrip("@").strip()
-        text = task.get("text") or ""
-        if not bot or not text:
-            task["last"] = "⚠️ не задан бот/текст"
-            return False
-        if not self.client or not self.running:
-            return False
-        try:
-            reply = await self._send_and_wait(bot, text)
-            clicked = ""
-            if task.get("click"):
-                ok = await self._try_click(reply, task["click"])
-                clicked = " + кнопка ✅" if ok else " + кнопка ⚠️"
-            task["last"] = f"✅ '{text}' → @{bot}{clicked} ({_clock()})"
-            if self.storage:
-                self.storage.save()
-            return True
-        except Exception as e:  # noqa: BLE001
-            task["last"] = f"ошибка: {e}"
-            return False
-
-    async def run_task_now(self, tid: int) -> str:
-        task = next((t for t in self.account.get("tasks", []) if t.get("id") == tid), None)
-        if not task:
-            return "задача не найдена"
-        await self._run_task(task)
-        self._task_next[tid] = self._task_after_next(task)
-        return task.get("last", "—")
-
-    def task_remaining(self, task: dict) -> str:
-        if not self.running:
-            return "—"
-        nxt = self._task_next.get(task.get("id"))
-        if nxt is None:
-            return "скоро"
-        rem = nxt - time.time()
-        return _fmt(int(rem)) if rem > 0 else "сейчас"
-
     # ---------- инфо для меню ----------
     def _remaining(self, ts: float, ready: str = "готово") -> str:
         if not self.running:
             return "—"
         rem = ts - time.time()
-        return _fmt(int(rem)) if rem > 0 else ready
+        return fmt_duration(int(rem)) if rem > 0 else ready
 
-    def card_remaining(self) -> str:
-        return self._remaining(self.card_next_ts)
 
-    def roulette_remaining(self) -> str:
-        return self._remaining(self.roulette_next_ts)
-
-    def mining_remaining(self) -> str:
-        return self._remaining(self.mining_next_ts, "скоро")
-
-    def container_remaining(self) -> str:
-        return self._remaining(self.container_next_ts, "скоро")
+class AccountWorker(FarmModule, AutosendModule, _WorkerBase):
+    """Полный воркер аккаунта = 🌾 Фарм карточек (farm.py) + 📨 Автоотправка
+    (autosend.py) + базовое подключение (этот файл). Модули независимы: каждый
+    включается/выключается своим тумблером (farm_enabled / autosend_enabled)."""
+    pass
