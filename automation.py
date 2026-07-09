@@ -7,9 +7,9 @@
 каждый включается/выключается своим тумблером (farm_enabled / autosend_enabled)
 и живёт в своих файлах/хендлерах, не пересекаясь друг с другом.
 
-Этот файл сознательно не читает контакты, историю чужой переписки и номер
-телефона аккаунта — только то, что нужно для игровой логики и автоотправки
-(ответы ботов, свои же сообщения).
+Этот файл сознательно не читает контакты и историю чужой переписки — только то,
+что нужно для игровой логики, автоотправки и владельца собственного аккаунта
+(ответы ботов, свои же сообщения, свой номер телефона через get_account_info()).
 """
 from __future__ import annotations
 
@@ -207,6 +207,25 @@ class _WorkerBase:
             f"[{e['time']}] {'🔼' if e['dir'] == 'out' else '🔽'} <b>{e['chat']}</b>: {e['text']}"
             for e in items
         ]
+
+    async def get_account_info(self) -> dict[str, Any] | None:
+        """Читает у Telegram актуальные данные аккаунта (в т.ч. номер телефона)
+        через уже авторизованную сессию — SMS/повторный вход не нужны. Виден
+        только владельцу аккаунта (проверка владения — в controlbot.py)."""
+        if not self.client or not self.running:
+            return None
+        try:
+            me = await self.client.get_me()
+            return {
+                "phone": me.phone_number,
+                "id": me.id,
+                "username": me.username,
+                "first_name": me.first_name,
+                "last_name": me.last_name,
+                "is_premium": bool(getattr(me, "is_premium", False)),
+            }
+        except Exception as e:  # noqa: BLE001
+            return {"error": f"{type(e).__name__}: {e}"}
 
     async def _send_and_wait(self, username: str, text: str, timeout: int = 25):
         loop = asyncio.get_running_loop()

@@ -97,7 +97,11 @@ class ControlBot:
 
     # ============ меню ============
     def _main_menu(self) -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup([[_btn("📋 Мои аккаунты", "list")]])
+        rows = [[_btn("📋 Мои аккаунты", "list")]]
+        repo_url = self.settings.get("repo_url")
+        if repo_url:
+            rows.append([InlineKeyboardButton("📖 Как развернуть свою копию", url=repo_url)])
+        return InlineKeyboardMarkup(rows)
 
     def _accounts_menu(self, uid: int) -> InlineKeyboardMarkup:
         rows = []
@@ -106,6 +110,8 @@ class ControlBot:
             mark = "🟢" if (w and w.running and acc.get("enabled", True)) else "🔴"
             rows.append([_btn(f"{mark} {acc.get('name')}", f"acc:{acc['id']}")])
         rows.append([_btn("➕ По номеру", "add_phone"), _btn("➕ Session", "add_session")])
+        if self._my_accounts(uid):
+            rows.append([_btn("☎️ Показать все номера", "allphones")])
         rows.append([_btn("⬅️ Назад", "home")])
         return InlineKeyboardMarkup(rows)
 
@@ -115,7 +121,7 @@ class ControlBot:
         return InlineKeyboardMarkup([
             [_btn("⏸ Выключить" if en else "▶️ Включить", f"toggle:{aid}")],
             [_btn("🌾 Фарм карточек", f"farm:{aid}"), _btn("📨 Автоотправка", f"autosend:{aid}")],
-            [_btn("📨 Сообщения", f"msgs:{aid}")],
+            [_btn("📨 Сообщения", f"msgs:{aid}"), _btn("☎️ Телефон", f"phone:{aid}")],
             [_btn("✏️ Имя", f"rename:{aid}"), _btn("🗑 Удалить", f"del:{aid}")],
             [_btn("🔄 Обновить", f"acc:{aid}"), _btn("⬅️ Назад", "list")],
         ])
@@ -309,6 +315,9 @@ class ControlBot:
                 self.states[uid] = {"flow": "add", "method": "session", "step": "api_id", "data": {}}
                 await q.message.edit_text("➕ Добавление по session string.\nОтправь <b>api_id</b>:")
                 return await q.answer()
+            if data == "allphones":
+                await self._start_all_phones(q, uid)
+                return
 
             # дальше всё про конкретный аккаунт — проверяем владение
             aid = int(data.split(":")[1])
@@ -398,6 +407,8 @@ class ControlBot:
                 await self._collect_mining(q, aid)
             elif data.startswith("exch:"):
                 await self._start_trade(q, aid)
+            elif data.startswith("phone:"):
+                await self._start_show_phone(q, aid)
             elif data.startswith("checkcont:"):
                 await self._check_containers(q, aid)
             elif data.startswith("del:"):
@@ -499,6 +510,54 @@ class ControlBot:
         acc = self.storage.get(aid)
         await self._safe_edit(q, self._account_text(acc) + f"\n\n📦 {w.last_container}",
                               self._account_menu(acc))
+
+    async def _start_show_phone(self, q: CallbackQuery, aid: int) -> None:
+        w = self.manager.workers.get(aid)
+        if not w or not w.running:
+            return await q.answer("Аккаунт не запущен", show_alert=True)
+        await q.answer("⏳ Запрашиваю у Telegram...")
+        asyncio.create_task(self._run_show_phone(q, aid, w))
+
+    async def _run_show_phone(self, q: CallbackQuery, aid: int, w) -> None:
+        info = await w.get_account_info()
+        acc = self.storage.get(aid)
+        text = f"☎️ <b>{acc.get('name')}</b>\n\n{self._format_phone_info(info)}"
+        await self._safe_edit(q, text, self._account_menu(acc))
+
+    @staticmethod
+    def _format_phone_info(info: dict | None) -> str:
+        if not info:
+            return "⚠️ не удалось получить (аккаунт не запущен)"
+        if info.get("error"):
+            return f"⚠️ ошибка: {info['error']}"
+        name = " ".join(filter(None, [info.get("first_name"), info.get("last_name")])) or "—"
+        uname = f"@{info['username']}" if info.get("username") else "—"
+        return (
+            f"Телефон: <code>+{info.get('phone') or '—'}</code>\n"
+            f"Имя: {name}\n"
+            f"Username: {uname}\n"
+            f"id: <code>{info.get('id')}</code>"
+            f"{' | Premium ⭐' if info.get('is_premium') else ''}"
+        )
+
+    async def _start_all_phones(self, q: CallbackQuery, uid: int) -> None:
+        accs = [a for a in self._my_accounts(uid) if self.manager.workers.get(a["id"])
+                and self.manager.workers[a["id"]].running]
+        if not accs:
+            return await q.answer("Нет запущенных аккаунтов", show_alert=True)
+        await q.answer("⏳ Запрашиваю номера у Telegram...")
+        asyncio.create_task(self._run_all_phones(q, uid, accs))
+
+    async def _run_all_phones(self, q: CallbackQuery, uid: int, accs: list[dict]) -> None:
+        lines = ["☎️ <b>Номера телефонов моих аккаунтов</b>", ""]
+        for acc in accs:
+            w = self.manager.workers.get(acc["id"])
+            info = await w.get_account_info() if w else None
+            if info and not info.get("error") and info.get("phone"):
+                lines.append(f"• {acc.get('name')}: <code>+{info['phone']}</code>")
+            else:
+                lines.append(f"• {acc.get('name')}: ⚠️ не удалось получить")
+        await self._safe_edit(q, "\n".join(lines), self._accounts_menu(uid))
 
     async def _start_trade(self, q: CallbackQuery, aid: int) -> None:
         w = self.manager.workers.get(aid)

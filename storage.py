@@ -53,6 +53,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "good_phone_keywords": ["фантом", "phantom"],  # «хорошие» телефоны (подстрока)
     "report_time": "00:00",     # ежедневный отчёт, МСК
     "payout_delay": 120,        # пауза после майнинга перед выводом, сек
+    "repo_url": "",              # ссылка на репозиторий (гайд самохостинга) — кнопка в главном меню, если задано
     "containers": {
         "bot": "phonegetcardsbot",   # кому слать «Магазин контейнеров» (по умолчанию — тот же бот)
         "sold_out_marker": "раскуплены",  # признак ответа «всё распродано, след. через X»
@@ -151,6 +152,7 @@ _ENV_MAP: dict[str, tuple[str, str]] = {
     "DEFAULT_ROULETTE_INTERVAL": ("default_roulette_interval", "int"),
     "REPORT_TIME": ("report_time", "str"),
     "PAYOUT_DELAY": ("payout_delay", "int"),
+    "REPO_URL": ("repo_url", "str"),
 }
 
 
