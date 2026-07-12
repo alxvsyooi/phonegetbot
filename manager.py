@@ -36,6 +36,19 @@ class Manager:
         self.self_commands_cfg = self_commands_cfg or {}
         self.workers: dict[int, AccountWorker] = {}
         self._trade_locks: dict[int, asyncio.Lock] = {}  # acc_id -> лок (см. run_trade)
+        # выставляется в main.py ПОСЛЕ создания ControlBot: даёт воркерам возможность
+        # слать владельцу интерактивные алерты (инлайн-кнопки) через управляющего бота,
+        # а не текстом от самого фарм-аккаунта (у обычных user-сессий callback-кнопки
+        # физически не обрабатываются)
+        self.bot_app = None
+
+    async def send_alert(self, owner_id: int, text: str, markup=None) -> None:
+        if not self.bot_app or not owner_id:
+            return
+        try:
+            await self.bot_app.send_message(owner_id, text, reply_markup=markup)
+        except Exception as e:  # noqa: BLE001
+            print(f"[manager] не удалось отправить алерт {owner_id}: {e}")
 
     # ---------- жизненный цикл ----------
     async def start_all(self) -> None:
@@ -55,6 +68,7 @@ class Manager:
             self_commands_cfg=self.self_commands_cfg,
         )
         worker.trade_runner = self.run_trade
+        worker.alert_fn = self.send_alert
         self.workers[acc_id] = worker
         print(f"[manager] подключаю «{acc.get('name')}» (id={acc_id})...")
         try:
@@ -92,7 +106,10 @@ class Manager:
         src = self.storage.get(src_id)
         if not src or src.get("owner_id") != owner_id:
             return 0
-        ident = src.get("username") or (str(src.get("tg_id")) if src.get("tg_id") else "")
+        # железная привязка: числовой tg_id надёжнее username (тот можно сменить/потерять)
+        ident = str(src.get("tg_id")) if src.get("tg_id") else (
+            f"@{src['username']}" if src.get("username") else ""
+        )
         if not ident:
             return 0
         n = 0

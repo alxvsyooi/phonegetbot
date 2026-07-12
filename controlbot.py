@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import time
 from typing import Any
 
 from pyrogram import Client, filters
@@ -121,7 +122,7 @@ class ControlBot:
         return InlineKeyboardMarkup([
             [_btn("⏸ Выключить" if en else "▶️ Включить", f"toggle:{aid}")],
             [_btn("🌾 Фарм карточек", f"farm:{aid}"), _btn("📨 Автоотправка", f"autosend:{aid}")],
-            [_btn("📨 Сообщения", f"msgs:{aid}"), _btn("☎️ Телефон", f"phone:{aid}")],
+            [_btn("☎️ Телефон", f"phone:{aid}")],
             [_btn("✏️ Имя", f"rename:{aid}"), _btn("🗑 Удалить", f"del:{aid}")],
             [_btn("🔄 Обновить", f"acc:{aid}"), _btn("⬅️ Назад", "list")],
         ])
@@ -171,20 +172,6 @@ class ControlBot:
         return (f"📨 <b>Автоотправка</b> — {acc.get('name')}\nМодуль: {ae}\n"
                 f"Задач настроено: {n}")
 
-    def _messages_menu(self, acc: dict) -> InlineKeyboardMarkup:
-        aid = acc["id"]
-        return InlineKeyboardMarkup([
-            [_btn("🔄 Обновить", f"msgs:{aid}")],
-            [_btn("⬅️ Назад", f"acc:{aid}")],
-        ])
-
-    def _messages_text(self, acc: dict) -> str:
-        w = self.manager.workers.get(acc["id"])
-        header = f"📨 <b>Последние сообщения</b> — {acc.get('name')}\n"
-        if not w or not w.running:
-            return header + "\nАккаунт не запущен."
-        return header + "\n" + "\n".join(w.recent_lines(15))
-
     def _automation_menu(self, acc: dict) -> InlineKeyboardMarkup:
         aid = acc["id"]
         def s(f, d=True):
@@ -197,7 +184,19 @@ class ControlBot:
             [_btn(f"💸 Авто-вывод: {s('autopay_enabled')}", f"tpay:{aid}")],
             [_btn(f"🤝 Авто-трейд: {s('autotrade_enabled', False)}", f"ttrade:{aid}")],
             [_btn(f"📦 Магазин контейнеров: {s('containers_enabled', False)}", f"tcont:{aid}")],
+            [_btn("📦 Какие категории покупать →", f"contcat:{aid}")],
             [_btn("⬅️ Назад", f"farm:{aid}")],
+        ])
+
+    def _container_categories_menu(self, acc: dict) -> InlineKeyboardMarkup:
+        aid = acc["id"]
+        def s(f):
+            return "вкл ✅" if acc.get(f, True) else "выкл ❌"
+        return InlineKeyboardMarkup([
+            [_btn(f"💰 Бюджетный: {s('containers_buy_budget')}", f"tcontb:{aid}")],
+            [_btn(f"💎 Дорогой: {s('containers_buy_expensive')}", f"tconte:{aid}")],
+            [_btn(f"🎁 Донатный: {s('containers_buy_donation')}", f"tcontd:{aid}")],
+            [_btn("⬅️ Назад", f"autom:{aid}")],
         ])
 
     def _intervals_menu(self, acc: dict) -> InlineKeyboardMarkup:
@@ -291,7 +290,7 @@ class ControlBot:
             lines.append(
                 f"📊 Всего: 📱 {st.get('phones', 0)} (⭐{st.get('good_phones', 0)}) | "
                 f"🎰 {st.get('roulette', 0)} | ⛏ {st.get('mining', 0)} | 🎁 {st.get('daily', 0)} | "
-                f"💸 {st.get('paid', 0)} | 🔄 {st.get('exchanged', 0)}"
+                f"💸 {st.get('paid', 0)} | 🔄 {st.get('exchanged', 0)} | 📦 {st.get('containers_bought', 0)}"
             )
         return "\n".join(lines)
 
@@ -344,9 +343,6 @@ class ControlBot:
                 await q.message.edit_text(f"🎯 Получатели — <b>{acc.get('name')}</b>\n"
                                           f"Введи @username или числовой id получателя.",
                                           reply_markup=self._targets_menu(acc))
-            elif data.startswith("msgs:"):
-                await q.message.edit_text(self._messages_text(acc),
-                                          reply_markup=self._messages_menu(acc))
             elif data.startswith("setpaytarget:"):
                 self._ask(uid, aid, "payout_target")
                 await q.message.edit_text(
@@ -389,6 +385,15 @@ class ControlBot:
                 await self._toggle(q, acc, "autotrade_enabled")
             elif data.startswith("tcont:"):
                 await self._toggle(q, acc, "containers_enabled")
+            elif data.startswith("contcat:"):
+                await q.message.edit_text(f"📦 Категории контейнеров — <b>{acc.get('name')}</b>",
+                                          reply_markup=self._container_categories_menu(acc))
+            elif data.startswith("tcontb:"):
+                await self._toggle_container_cat(q, acc, "containers_buy_budget")
+            elif data.startswith("tconte:"):
+                await self._toggle_container_cat(q, acc, "containers_buy_expensive")
+            elif data.startswith("tcontd:"):
+                await self._toggle_container_cat(q, acc, "containers_buy_donation")
             elif data.startswith("tselfcmd:"):
                 await self._toggle(q, acc, "self_commands_enabled", redisplay="autosend")
             elif data.startswith("setcard:"):
@@ -411,6 +416,23 @@ class ControlBot:
                 await self._start_show_phone(q, aid)
             elif data.startswith("checkcont:"):
                 await self._check_containers(q, aid)
+            elif data.startswith("capgo:"):
+                cat = data.split(":")[2]
+                w = self.manager.workers.get(aid)
+                if not w or not w.running:
+                    return await q.answer("Аккаунт не запущен", show_alert=True)
+                await q.answer("⏳ Пробую открыть магазин...")
+                asyncio.create_task(self._run_resume_containers(q, aid, w, cat))
+                return
+            elif data.startswith("capskip:"):
+                w = self.manager.workers.get(aid)
+                if w:
+                    retry = int(self.settings.get("containers", {}).get("unknown_retry", 600))
+                    w.container_next_ts = time.time() + retry
+                await q.answer("Пропущено")
+                await q.message.edit_text(f"⏭ Пропущено — «{acc.get('name')}»",
+                                          reply_markup=self._account_menu(acc))
+                return
             elif data.startswith("del:"):
                 await q.message.edit_text(
                     "Точно удалить аккаунт?",
@@ -485,6 +507,12 @@ class ControlBot:
             await q.message.edit_text(f"⚙️ Автоматизация — <b>{acc.get('name')}</b>",
                                       reply_markup=self._automation_menu(acc))
 
+    async def _toggle_container_cat(self, q: CallbackQuery, acc: dict, field: str) -> None:
+        acc[field] = not acc.get(field, True)
+        self.storage.save()
+        await q.message.edit_text(f"📦 Категории контейнеров — <b>{acc.get('name')}</b>",
+                                  reply_markup=self._container_categories_menu(acc))
+
     async def _collect_mining(self, q: CallbackQuery, aid: int) -> None:
         w = self.manager.workers.get(aid)
         if not w or not w.running:
@@ -509,6 +537,12 @@ class ControlBot:
         await w.check_containers()
         acc = self.storage.get(aid)
         await self._safe_edit(q, self._account_text(acc) + f"\n\n📦 {w.last_container}",
+                              self._account_menu(acc))
+
+    async def _run_resume_containers(self, q: CallbackQuery, aid: int, w, cat: str) -> None:
+        result = await w.resume_container_check(prefer=None if cat == "default" else cat)
+        acc = self.storage.get(aid)
+        await self._safe_edit(q, self._account_text(acc) + f"\n\n📦 {result}",
                               self._account_menu(acc))
 
     async def _start_show_phone(self, q: CallbackQuery, aid: int) -> None:
@@ -631,7 +665,12 @@ class ControlBot:
                 await m.reply("Один токен без пробелов — @username или числовой id. Ещё раз:")
                 return
             else:
-                acc[field] = val
+                bare = val.lstrip("@").strip()
+                if not bare:
+                    await m.reply("Пусто. Нужен @username или числовой id. Ещё раз:")
+                    return
+                # цифры — считаем это id как есть; иначе username, сами добавим @
+                acc[field] = bare if bare.isdigit() else f"@{bare}"
             self.storage.save()
             self.states.pop(uid, None)
             await m.reply(f"🎯 Получатели — <b>{acc.get('name')}</b>",

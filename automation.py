@@ -14,20 +14,16 @@
 from __future__ import annotations
 
 import asyncio
-import html
 import time
-from collections import deque
 from typing import Any
 
 from pyrogram import Client, filters
 from pyrogram.handlers import MessageHandler, EditedMessageHandler
 
 from storage import CARDS_BOT
-from common import MSK, parse_hhmm, seconds_until_msk, fmt_duration, clock, chat_label, msg_preview
+from common import MSK, parse_hhmm, seconds_until_msk, fmt_duration, clock
 from farm import FarmModule
 from autosend import AutosendModule
-
-MSG_LOG_SIZE = 30  # сколько последних сообщений держим в памяти на аккаунт
 
 # main.py использует эти имена как `from automation import MSK, _parse_hhmm`
 _parse_hhmm = parse_hhmm
@@ -57,13 +53,13 @@ class _WorkerBase:
         self.client: Client | None = None
         self.running = False
         self.trade_runner = None               # callable(farm_id) -> coroutine (ставит Manager)
+        self.alert_fn = None                    # callable(owner_id, text, markup) -> coroutine (ставит Manager)
 
         self._tasks: list[asyncio.Task] = []
         self._pending: dict[str, asyncio.Future] = {}
         self._trade_mode = False
         self._trade_queue: asyncio.Queue | None = None
         self._task_next: dict[int, float] = {}   # tid -> время следующего запуска
-        self.recent_messages: deque = deque(maxlen=MSG_LOG_SIZE)  # лог сообщений (виден владельцу)
 
         now = 0.0
         self.card_next_ts = now
@@ -105,7 +101,7 @@ class _WorkerBase:
         return (
             f"📱 {st.get('phones', 0)} (⭐{st.get('good_phones', 0)}) | "
             f"🎰 {st.get('roulette', 0)} | ⛏ {st.get('mining', 0)} | 🎁 {st.get('daily', 0)} | "
-            f"💸 {st.get('paid', 0)} | 🔄 {st.get('exchanged', 0)}"
+            f"💸 {st.get('paid', 0)} | 🔄 {st.get('exchanged', 0)} | 📦 {st.get('containers_bought', 0)}"
         )
 
     # ---------- жизненный цикл ----------
@@ -129,9 +125,6 @@ class _WorkerBase:
         self.client.add_handler(
             MessageHandler(self._on_self_command, filters.me & filters.private), group=1
         )
-        # лог последних сообщений (для кнопки «📨 Сообщения», виден только владельцу),
-        # отдельная группа — просто наблюдатель, ничего не решает и не блокирует
-        self.client.add_handler(MessageHandler(self._on_any_message, filters.all), group=2)
         await self.client.start()
 
         try:  # запомним tg_id/username (нужно для трейда и определения владельца)
@@ -183,30 +176,6 @@ class _WorkerBase:
         fut = self._pending.pop(uname, None)
         if fut and not fut.done():
             fut.set_result(message)
-
-    async def _on_any_message(self, _client, message) -> None:
-        """Наблюдатель: складывает КАЖДОЕ сообщение (входящее и своё) в кольцевой
-        буфер для кнопки «📨 Сообщения». Видно только владельцу аккаунта в боте.
-        Ничего не решает, ничему не мешает."""
-        try:
-            self.recent_messages.append({
-                "time": clock(),
-                "dir": "out" if getattr(message, "outgoing", False) else "in",
-                "chat": html.escape(chat_label(message.chat)),
-                "text": html.escape(msg_preview(message))[:120],
-            })
-        except Exception:
-            pass
-
-    def recent_lines(self, limit: int = 15) -> list[str]:
-        items = list(self.recent_messages)[-limit:]
-        items.reverse()  # новые сверху
-        if not items:
-            return ["(пока пусто)"]
-        return [
-            f"[{e['time']}] {'🔼' if e['dir'] == 'out' else '🔽'} <b>{e['chat']}</b>: {e['text']}"
-            for e in items
-        ]
 
     async def get_account_info(self) -> dict[str, Any] | None:
         """Читает у Telegram актуальные данные аккаунта (в т.ч. номер телефона)

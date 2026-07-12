@@ -55,10 +55,19 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "payout_delay": 120,        # пауза после майнинга перед выводом, сек
     "repo_url": "",              # ссылка на репозиторий (гайд самохостинга) — кнопка в главном меню, если задано
     "containers": {
-        "bot": "phonegetcardsbot",   # кому слать «Магазин контейнеров» (по умолчанию — тот же бот)
+        "bot": "phonegetcardsbot",        # кому слать команду открытия магазина
+        "open_command": "/tcontainershop",  # чем открываем магазин контейнеров
         "sold_out_marker": "раскуплены",  # признак ответа «всё распродано, след. через X»
-        "unknown_retry": 600,        # если ответ не распознан (не sold-out) — повтор через N сек
-        "captcha_alert_text": "КАПЧА",  # что слать владельцу при нераспознанном ответе
+        "captcha_marker": "анти-бот защита",  # признак математической капчи (решает человек)
+        "shop_marker": "магазин контейнеров",  # признак того, что открылось меню магазина
+        "unknown_retry": 600,             # обычная пауза перед след. проверкой после цикла
+        "retry_interval": 10,             # пауза между повторными попытками, пока бот перегружен/капча
+        "retry_window": 600,              # сколько всего секунд долбить магазин при рестоке
+        "preferred_categories": ["Донатный", "Дорогой", "Бюджетный"],  # порядок покупки категорий
+        "single_button": "купить 1",      # кнопка «Купить 1 шт.»
+        "bulk_button": "купить оптом",    # кнопка «Купить оптом»
+        "confirm_button": "подтвердить",  # кнопка подтверждения покупки
+        "captcha_alert_text": "КАПЧА",    # что слать владельцу, когда нужна капча/ответ не распознан
     },
     # «.trade» / «.pay 505050», напечатанные самим аккаунтом в личке с кем-то,
     # автоматически превращаются в команду боту карточек с получателем = собеседник.
@@ -110,6 +119,9 @@ ACCOUNT_DEFAULTS: dict[str, Any] = {
     "autopay_enabled": True,
     "autotrade_enabled": False,
     "containers_enabled": False,
+    "containers_buy_budget": True,      # 📦 Бюджетный контейнер — покупать при рестоке
+    "containers_buy_expensive": True,   # 📦 Дорогой контейнер
+    "containers_buy_donation": True,    # 📦 Донатный контейнер
     "daily_reward_enabled": True,
     "self_commands_enabled": True,
     "card_interval": 3600,
@@ -119,7 +131,7 @@ ACCOUNT_DEFAULTS: dict[str, Any] = {
 
 def _empty_stats() -> dict[str, int]:
     return {"phones": 0, "good_phones": 0, "roulette": 0, "mining": 0, "paid": 0,
-            "exchanged": 0, "daily": 0}
+            "exchanged": 0, "daily": 0, "containers_bought": 0}
 
 
 def _read_json(path: str, default):

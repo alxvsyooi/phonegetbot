@@ -12,6 +12,8 @@ import re
 import time
 from datetime import datetime
 
+from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
 from storage import (
     CARDS_BOT, ROULETTE_BOT,
     CARD_WORD, ROULETTE_WORD, ROULETTE_BUTTON,
@@ -77,6 +79,64 @@ def _contains_any(text: str | None, keywords: list[str]) -> bool:
         return False
     low = text.lower()
     return any(k in low for k in keywords)
+
+
+# "Вы можете купить ещё 2 шт." — сколько ещё разрешает докупить эта категория
+_REMAINING_RE = re.compile(r"можете купить ещ[её]\s*(\d+)", re.IGNORECASE)
+
+
+def parse_remaining(text: str | None) -> int | None:
+    if not text:
+        return None
+    m = _REMAINING_RE.search(text)
+    return int(m.group(1)) if m else None
+
+
+def _all_buttons(message) -> list[str]:
+    if message is None or not getattr(message, "reply_markup", None):
+        return []
+    out = []
+    for row in message.reply_markup.inline_keyboard:
+        for b in row:
+            t = getattr(b, "text", "") or ""
+            if t:
+                out.append(t)
+    return out
+
+
+def _find_button(message, substr: str) -> str | None:
+    sub = substr.lower()
+    for t in _all_buttons(message):
+        if sub in t.lower():
+            return t
+    return None
+
+
+_CATEGORY_KEYWORDS = {"donation": "донат", "expensive": "дорог", "budget": "бюджет"}
+_CATEGORY_EMOJI = {"donation": "🎁", "expensive": "💎", "budget": "💰"}
+
+
+def _category_key(label: str) -> str | None:
+    low = label.lower()
+    for key, kw in _CATEGORY_KEYWORDS.items():
+        if kw in low:
+            return key
+    return None
+
+
+def _max_numeric_button(message) -> str | None:
+    """Кнопка-число с наибольшим значением (селектор количества — «1», «2», ...).
+    Терпит лёгкую эмодзи-обвязку цифры, но не «Купить 1 шт.» (там текста много)."""
+    best_t, best_n = None, -1
+    for t in _all_buttons(message):
+        stripped = t.strip()
+        digits = re.sub(r"\D", "", stripped)
+        if not digits or len(stripped) - len(digits) > 3:
+            continue
+        n = int(digits)
+        if n > best_n:
+            best_n, best_t = n, t
+    return best_t
 
 
 class FarmModule:
@@ -214,10 +274,9 @@ class FarmModule:
 
     # ---------- магазин контейнеров ----------
     async def _container_loop(self) -> None:
-        """Раз в кулдаун шлёт «Магазин контейнеров». Если ответ — стандартное
-        «раскуплены, след. через X» — просто ждёт это время. Если ответ ДРУГОЙ
-        (контейнеры есть в наличии / нужна капча) — оповещает владельца и ждёт
-        unknown_retry перед следующей попыткой."""
+        """Раз в кулдаун вызывает check_containers() — она сама разбирает ответ
+        (распродано/капча/магазин открыт/бот перегружен) и решает, когда проверять
+        снова. Подробности — в докстринге check_containers()."""
         while self.running:
             try:
                 if self._trade_mode:
@@ -238,46 +297,299 @@ class FarmModule:
                 self.container_next_ts = time.time() + 60
                 await asyncio.sleep(5)
 
+    async def _probe_shop(self, cfg: dict) -> tuple[str, object, str | None]:
+        """Один запрос открытия магазина. Возвращает (kind, reply, text), где kind —
+        'sold_out' | 'shop' | 'captcha' | 'none' (бот не ответил) | 'unknown'."""
+        bot = cfg.get("bot") or CARDS_BOT
+        open_cmd = cfg.get("open_command") or CONTAINER_WORD
+        sold_out_marker = (cfg.get("sold_out_marker") or "раскуплены").lower()
+        captcha_marker = (cfg.get("captcha_marker") or "анти-бот защита").lower()
+        shop_marker = (cfg.get("shop_marker") or "магазин контейнеров").lower()
+        reply = await self._send_and_wait(bot, open_cmd, timeout=20)
+        text = (getattr(reply, "text", None) or getattr(reply, "caption", None)) if reply else None
+        low = (text or "").lower()
+        if reply is None:
+            return "none", reply, text
+        if sold_out_marker in low:
+            return "sold_out", reply, text
+        if shop_marker in low or any(_find_button(reply, kw) for kw in ("бюджет", "донат", "дорог")):
+            return "shop", reply, text
+        if captcha_marker in low:
+            return "captcha", reply, text
+        return "unknown", reply, text
+
     async def check_containers(self) -> str:
-        """«Магазин контейнеров» -> распознать «раскуплены, след. через X» и ждать,
-        либо (неожиданный ответ) оповестить владельца. Используется циклом и
-        кнопкой «Проверить сейчас». Возвращает last_container."""
+        """Открыть магазин контейнеров и разобрать ответ:
+        - «раскуплены, след. через X» -> просто ждать это время;
+        - меню магазина (категории) -> купить по preferred_categories/тумблерам;
+        - нет ответа вообще -> игровой бот перегружен (частая ситуация на рестоке) —
+          ЭТО можно долбить: повтор открытия с периодичностью retry_interval, не
+          дольше retry_window;
+        - анти-бот капча (картинка-пример) -> бот её НЕ решает и НЕ долбит магазин
+          повторно (там ограниченное число попыток на капчу, спам может их сжечь) —
+          шлёт владельцу интерактивный алерт с выбором категории и ждёт, пока он
+          сам решит капчу и нажмёт кнопку (resume_container_check);
+        - что-то совсем незнакомое -> так же алерт владельцу и стоп.
+        Используется циклом и кнопкой «Проверить сейчас». Возвращает last_container."""
         if not self.client or not self.running:
             self.last_container = "аккаунт не запущен"
             return self.last_container
         cfg = self.container_cfg
         bot = cfg.get("bot") or CARDS_BOT
-        marker = cfg.get("sold_out_marker", "раскуплены")
+        retry_interval = max(3, int(cfg.get("retry_interval", 10)))
+        retry_window = max(retry_interval, int(cfg.get("retry_window", 600)))
+        unknown_retry = int(cfg.get("unknown_retry", 600))
+
+        deadline = time.time() + retry_window
+        attempt = 0
+        try:
+            while True:
+                attempt += 1
+                kind, reply, text = await self._probe_shop(cfg)
+
+                if kind == "sold_out":
+                    cd = parse_shop_cooldown(text)
+                    delay = cd if cd is not None else unknown_retry
+                    self.container_next_ts = time.time() + delay + BUFFER_SEC
+                    self.last_container = f"⏳ раскуплены, след. через {fmt_duration(delay)} ({clock()} {today_msk()})"
+                    return self.last_container
+
+                if kind == "shop":
+                    bought = await self._buy_containers(bot, reply, cfg)
+                    self.container_next_ts = time.time() + unknown_retry
+                    self.last_container = (
+                        f"🛒 {bought} ({clock()} {today_msk()})" if bought else
+                        f"🛒 магазин открыт, покупать нечего/лимиты исчерпаны ({clock()} {today_msk()})"
+                    )
+                    return self.last_container
+
+                if kind == "captcha":
+                    # НЕ ретраим: капча даёт мало попыток, повторное открытие может их сжечь.
+                    # Ждём, пока владелец сам решит капчу и нажмёт кнопку в алерте.
+                    self.container_next_ts = time.time() + unknown_retry
+                    self.last_container = f"🚨 нужна капча — жду владельца ({clock()} {today_msk()})"
+                    await self._notify_owner_captcha(cfg, text, reason="captcha")
+                    return self.last_container
+
+                if kind == "none":
+                    # это НЕ капча — просто бот перегружен на рестоке, тут ретраить можно
+                    self.last_container = f"⏳ бот перегружен, нет ответа, попытка {attempt} ({clock()})"
+                    if time.time() >= deadline:
+                        break
+                    await asyncio.sleep(retry_interval)
+                    continue
+
+                # неожиданный, ни на что не похожий ответ — зовём владельца разобраться
+                self.container_next_ts = time.time() + unknown_retry
+                self.last_container = f"⚠️ неожиданный ответ, оповестил владельца ({clock()} {today_msk()})"
+                await self._notify_owner_captcha(cfg, text, reason="unknown")
+                return self.last_container
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            self.container_next_ts = time.time() + 60
+            self.last_container = f"ошибка: {e}"
+            return self.last_container
+
+        # вышли по deadline: бот так и не ответил (перегруз на рестоке)
+        self.container_next_ts = time.time() + unknown_retry
+        self.last_container = f"⏱ магазин не открылся за {fmt_duration(retry_window)}, отступаю ({clock()})"
+        await self._notify_owner_captcha(cfg, None, reason="timeout")
+        return self.last_container
+
+    async def resume_container_check(self, prefer: str | None = None) -> str:
+        """Однократная попытка открыть магазин — вызывается ВРУЧНУЮ (кнопка в алерте),
+        когда владелец уже сам решил капчу. В отличие от check_containers() НЕ
+        зацикливается и не долбит магазин повторно — капча даёт мало попыток.
+        prefer — ключ категории ('donation'/'expensive'/'budget'), которую поставить
+        первой в очереди покупки на этот заход (кнопка из алерта), либо None/'default'
+        для обычного порядка preferred_categories."""
+        if not self.client or not self.running:
+            self.last_container = "аккаунт не запущен"
+            return self.last_container
+        cfg = self.container_cfg
+        bot = cfg.get("bot") or CARDS_BOT
         unknown_retry = int(cfg.get("unknown_retry", 600))
         try:
-            reply = await self._send_and_wait(bot, CONTAINER_WORD)
-            text = getattr(reply, "text", None) or getattr(reply, "caption", None)
-            if text and marker.lower() in text.lower():
+            kind, reply, text = await self._probe_shop(cfg)
+
+            if kind == "sold_out":
                 cd = parse_shop_cooldown(text)
                 delay = cd if cd is not None else unknown_retry
                 self.container_next_ts = time.time() + delay + BUFFER_SEC
                 self.last_container = f"⏳ раскуплены, след. через {fmt_duration(delay)} ({clock()} {today_msk()})"
-            elif reply is None:
+            elif kind == "shop":
+                eff_cfg = cfg
+                if prefer and prefer != "default":
+                    prefs = list(cfg.get("preferred_categories") or ["Донатный", "Дорогой", "Бюджетный"])
+                    kw = _CATEGORY_KEYWORDS.get(prefer)
+                    match = next((p for p in prefs if kw and kw in p.lower()), None)
+                    if match:
+                        prefs = [match] + [p for p in prefs if p != match]
+                        eff_cfg = dict(cfg, preferred_categories=prefs)
+                bought = await self._buy_containers(bot, reply, eff_cfg)
                 self.container_next_ts = time.time() + unknown_retry
-                self.last_container = f"⚠️ нет ответа ({clock()})"
+                self.last_container = (
+                    f"🛒 {bought} ({clock()} {today_msk()})" if bought else
+                    f"🛒 магазин открыт, покупать нечего/лимиты исчерпаны ({clock()} {today_msk()})"
+                )
+            elif kind == "captcha":
+                self.container_next_ts = time.time() + unknown_retry
+                self.last_container = f"🚨 капча всё ещё не решена ({clock()} {today_msk()})"
+                await self._notify_owner_captcha(cfg, text, reason="captcha")
+            elif kind == "none":
+                self.container_next_ts = time.time() + unknown_retry
+                self.last_container = f"⚠️ бот не отвечает ({clock()} {today_msk()})"
             else:
-                # неожиданный ответ: возможно есть в наличии / нужна капча — зовём владельца
                 self.container_next_ts = time.time() + unknown_retry
-                self.last_container = f"🚨 неожиданный ответ, оповестил владельца ({clock()} {today_msk()})"
-                await self._notify_owner_captcha(cfg, text)
+                self.last_container = f"⚠️ неожиданный ответ, оповестил владельца ({clock()} {today_msk()})"
+                await self._notify_owner_captcha(cfg, text, reason="unknown")
         except Exception as e:  # noqa: BLE001
             self.container_next_ts = time.time() + 60
             self.last_container = f"ошибка: {e}"
         return self.last_container
 
-    async def _notify_owner_captcha(self, cfg: dict, shop_text: str | None) -> None:
+    def _category_allowed(self, label: str) -> bool:
+        low = label.lower()
+        if "донат" in low:
+            return self.account.get("containers_buy_donation", True)
+        if "дорог" in low:
+            return self.account.get("containers_buy_expensive", True)
+        if "бюджет" in low:
+            return self.account.get("containers_buy_budget", True)
+        return True
+
+    async def _click_step(self, bot: str, msg, label_substr: str, cfg: dict, timeout: int = 15):
+        """Жмёт кнопку по подстроке и ждёт следующий ответ бота. Если бот перегружен
+        и не отвечает — повторяет клик несколько раз с паузой retry_interval вместо
+        того, чтобы сразу сдаться (актуально на рестоке, когда много желающих)."""
+        btn = _find_button(msg, label_substr)
+        if not btn:
+            return None
+        retry_interval = max(3, int(cfg.get("retry_interval", 10)))
+        for i in range(3):
+            if not await self._try_click(msg, btn):
+                return None
+            result = await self._wait_next(bot, timeout=timeout)
+            if result is not None:
+                return result
+            if i < 2:
+                await asyncio.sleep(retry_interval)
+        return None
+
+    async def _click_confirm(self, msg, label_substr: str, cfg: dict) -> bool:
+        btn = _find_button(msg, label_substr)
+        if not btn:
+            return False
+        retry_interval = max(3, int(cfg.get("retry_interval", 10)))
+        for i in range(3):
+            if await self._try_click(msg, btn):
+                return True
+            if i < 2:
+                await asyncio.sleep(retry_interval)
+        return False
+
+    async def _buy_category(self, bot: str, shop_msg, category_label: str, cfg: dict) -> tuple[bool, str]:
+        if not _find_button(shop_msg, category_label):
+            return False, ""
+        detail = await self._click_step(bot, shop_msg, category_label, cfg, timeout=15)
+        if detail is None:
+            return False, f"{category_label}: нет ответа на выбор категории"
+        dtext = getattr(detail, "text", None) or getattr(detail, "caption", None) or ""
+        remaining = parse_remaining(dtext)
+        if not remaining or remaining <= 0:
+            return False, ""  # лимит категории исчерпан — не ошибка, просто нечего брать
+
+        single_btn = cfg.get("single_button", "купить 1")
+        bulk_btn = cfg.get("bulk_button", "купить оптом")
+        confirm_btn = cfg.get("confirm_button", "подтвердить")
+
+        if remaining == 1:
+            step = await self._click_step(bot, detail, single_btn, cfg, timeout=15)
+        else:
+            qty_msg = await self._click_step(bot, detail, bulk_btn, cfg, timeout=15)
+            if qty_msg is None:
+                return False, f"{category_label}: нет ответа на «купить оптом»"
+            qty_btn = _find_button(qty_msg, str(remaining)) or _max_numeric_button(qty_msg)
+            if not qty_btn:
+                return False, f"{category_label}: не нашёл кнопку количества"
+            step = await self._click_step(bot, qty_msg, qty_btn, cfg, timeout=15)
+
+        if step is None:
+            return False, f"{category_label}: нет ответа после выбора количества"
+
+        # если это экран подтверждения — жмём; если покупка уже прошла сама — не мешаем
+        if _find_button(step, confirm_btn):
+            if not await self._click_confirm(step, confirm_btn, cfg):
+                return False, f"{category_label}: не подтвердилась покупка"
+
+        self._bump("containers_bought", remaining)
+        return True, f"{remaining} шт. ({category_label})"
+
+    async def _buy_containers(self, bot: str, shop_msg, cfg: dict) -> str:
+        """Проходит preferred_categories по порядку, покупая максимум доступного
+        в каждой разрешённой (тумблерами containers_buy_*) категории."""
+        prefs = cfg.get("preferred_categories") or ["Донатный", "Дорогой", "Бюджетный"]
+        results = []
+        msg = shop_msg
+        open_cmd = cfg.get("open_command") or CONTAINER_WORD
+        for label in prefs:
+            if not self._category_allowed(label):
+                continue
+            ok, info = await self._buy_category(bot, msg, label, cfg)
+            if ok:
+                results.append(info)
+                refreshed = await self._send_and_wait(bot, open_cmd, timeout=20)
+                if refreshed is not None:
+                    msg = refreshed
+        return "; ".join(results)
+
+    def _captcha_markup(self, cfg: dict) -> InlineKeyboardMarkup:
+        """Кнопки выбора категории прямо в алерте — жмёшь, когда сам решил капчу
+        (или просто хочешь попробовать снова), и это ОДНОКРАТНО пробует магазин
+        заново через resume_container_check(), уже без циклов."""
+        prefs = cfg.get("preferred_categories") or ["Донатный", "Дорогой", "Бюджетный"]
+        rows = []
+        for label in prefs:
+            key = _category_key(label)
+            if not key or not self._category_allowed(label):
+                continue
+            emoji = _CATEGORY_EMOJI.get(key, "📦")
+            rows.append([InlineKeyboardButton(f"{emoji} {label}", callback_data=f"capgo:{self.id}:{key}")])
+        rows.append([InlineKeyboardButton("✅ Как настроено (по порядку)", callback_data=f"capgo:{self.id}:default")])
+        rows.append([InlineKeyboardButton("⏭ Пропустить в этот раз", callback_data=f"capskip:{self.id}")])
+        return InlineKeyboardMarkup(rows)
+
+    async def _notify_owner_captcha(self, cfg: dict, shop_text: str | None, reason: str = "captcha") -> None:
         owner_id = self.account.get("owner_id")
         if not owner_id:
             return
         alert = cfg.get("captcha_alert_text", "КАПЧА")
-        preview = f"\n\n«{shop_text[:200]}»" if shop_text else ""
+        preview = f"\n\n«{shop_text[:300]}»" if shop_text else ""
+        if reason == "captcha":
+            head = (
+                f"🚨 {alert} — магазин контейнеров, «{self.name}»\n"
+                f"Реши капчу САМ в чате с игровым ботом (попыток обычно мало — "
+                f"бот больше не будет сам слать команду открытия магазина, пока ты не нажмёшь ниже)."
+            )
+        elif reason == "timeout":
+            head = (
+                f"⏱ Магазин контейнеров — «{self.name}»: бот игры не отвечал долго "
+                f"(перегружен на рестоке). Попробуй вручную, когда будет минутка."
+            )
+        else:
+            head = f"⚠️ Магазин контейнеров прислал неожиданный ответ — «{self.name}». Посмотри вручную."
+        text = f"{head}{preview}\n\nЧто делать дальше — выбери:"
+        markup = self._captcha_markup(cfg)
+        if self.alert_fn:
+            try:
+                await self.alert_fn(owner_id, text, markup)
+                return
+            except Exception as e:  # noqa: BLE001
+                print(f"[{self.name}] не удалось отправить интерактивный алерт: {e}")
+        # запасной путь, если alert_fn почему-то не подключен — просто текст от аккаунта
         try:
-            await self.client.send_message(owner_id, f"{alert} — «{self.name}»{preview}")
+            await self.client.send_message(owner_id, text)
         except Exception as e:  # noqa: BLE001
             print(f"[{self.name}] не удалось оповестить владельца: {e}")
 

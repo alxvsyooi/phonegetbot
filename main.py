@@ -17,7 +17,7 @@ from storage import Storage, load_settings
 def _build_report(accounts: list[dict]) -> str:
     lines = [f"📊 Отчёт за сутки ({datetime.now(MSK).strftime('%d.%m.%Y')})", ""]
     tot = {"phones": 0, "good_phones": 0, "roulette": 0, "mining": 0, "paid": 0,
-           "exchanged": 0, "daily": 0}
+           "exchanged": 0, "daily": 0, "containers_bought": 0}
     for acc in accounts:
         d = acc.get("stats_day", {})
         for k in tot:
@@ -25,13 +25,13 @@ def _build_report(accounts: list[dict]) -> str:
         lines.append(
             f"• {acc.get('name')}: 📱{d.get('phones', 0)} (⭐{d.get('good_phones', 0)}) "
             f"🎰{d.get('roulette', 0)} ⛏{d.get('mining', 0)} 🎁{d.get('daily', 0)} "
-            f"💸{d.get('paid', 0)} 🔄{d.get('exchanged', 0)}"
+            f"💸{d.get('paid', 0)} 🔄{d.get('exchanged', 0)} 📦{d.get('containers_bought', 0)}"
         )
     lines += [
         "",
         f"ИТОГО: 📱{tot['phones']} (⭐{tot['good_phones']}) "
         f"🎰{tot['roulette']} ⛏{tot['mining']} 🎁{tot['daily']} "
-        f"💸{tot['paid']} 🔄{tot['exchanged']}",
+        f"💸{tot['paid']} 🔄{tot['exchanged']} 📦{tot['containers_bought']}",
     ]
     return "\n".join(lines)
 
@@ -55,7 +55,8 @@ async def daily_report_loop(control: ControlBot, storage: Storage, settings: dic
                     except Exception as e:  # noqa: BLE001
                         print(f"[report] не отправить {owner}: {e}")
                 empty = {"phones": 0, "good_phones": 0, "roulette": 0,
-                         "mining": 0, "paid": 0, "exchanged": 0, "daily": 0}
+                         "mining": 0, "paid": 0, "exchanged": 0, "daily": 0,
+                         "containers_bought": 0}
                 for acc in storage.accounts:
                     acc["stats_day"] = dict(empty)
                 storage.save()
@@ -123,6 +124,7 @@ async def main() -> None:
         self_commands_cfg=settings.get("self_commands", {}),
     )
     control = ControlBot(settings, storage, manager)
+    manager.bot_app = control.app  # чтобы фарм-воркеры могли слать интерактивные алерты (капча и т.п.)
 
     print("[startup] подключаю управляющего бота...")
     await control.app.start()

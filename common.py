@@ -51,26 +51,3 @@ def clock() -> str:
 
 def today_msk() -> str:
     return datetime.now(MSK).strftime("%d.%m")
-
-
-def chat_label(chat) -> str:
-    uname = getattr(chat, "username", None)
-    if uname:
-        return f"@{uname}"
-    title = getattr(chat, "title", None)
-    if title:
-        return title
-    first = getattr(chat, "first_name", None)
-    if first:
-        return first
-    return str(getattr(chat, "id", "чат"))
-
-
-def msg_preview(message) -> str:
-    text = getattr(message, "text", None) or getattr(message, "caption", None)
-    if text:
-        return text
-    media = getattr(message, "media", None)
-    if media:
-        return f"[{str(media).rsplit('.', 1)[-1].lower()}]"
-    return "[сообщение]"
