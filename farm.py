@@ -83,6 +83,10 @@ def _contains_any(text: str | None, keywords: list[str]) -> bool:
 
 # "Вы можете купить ещё 2 шт." — сколько ещё разрешает докупить эта категория
 _REMAINING_RE = re.compile(r"можете купить ещ[её]\s*(\d+)", re.IGNORECASE)
+# "Цена за 1 шт: 8,979,354 ТОчек"
+_UNIT_PRICE_RE = re.compile(r"цена за\s*1\s*шт\.?\s*:?\s*([\d\s.,]+)", re.IGNORECASE)
+# "Итоговая стоимость: 17,958,708 ТОчек"
+_TOTAL_PRICE_RE = re.compile(r"итогов[а-я]*\s+стоимость\s*:?\s*([\d\s.,]+)", re.IGNORECASE)
 
 
 def parse_remaining(text: str | None) -> int | None:
@@ -90,6 +94,26 @@ def parse_remaining(text: str | None) -> int | None:
         return None
     m = _REMAINING_RE.search(text)
     return int(m.group(1)) if m else None
+
+
+def parse_unit_price(text: str | None) -> int | None:
+    if not text:
+        return None
+    m = _UNIT_PRICE_RE.search(text)
+    if not m:
+        return None
+    digits = re.sub(r"\D", "", m.group(1))
+    return int(digits) if digits else None
+
+
+def parse_total_price(text: str | None) -> int | None:
+    if not text:
+        return None
+    m = _TOTAL_PRICE_RE.search(text)
+    if not m:
+        return None
+    digits = re.sub(r"\D", "", m.group(1))
+    return int(digits) if digits else None
 
 
 def _all_buttons(message) -> list[str]:
@@ -114,6 +138,13 @@ def _find_button(message, substr: str) -> str | None:
 
 _CATEGORY_KEYWORDS = {"donation": "донат", "expensive": "дорог", "budget": "бюджет"}
 _CATEGORY_EMOJI = {"donation": "🎁", "expensive": "💎", "budget": "💰"}
+# ожидаемые границы цены за 1 шт. по факту наблюдений — используются только как
+# страховка от бага парсинга (см. _buy_category), не как жёсткий лимит покупки
+_DEFAULT_PRICE_RANGE = {
+    "budget": (1_500_000, 3_000_000),
+    "expensive": (7_000_000, 9_000_000),
+    "donation": (7_000_000, 9_500_000),
+}
 
 
 def _category_key(label: str) -> str | None:
@@ -122,6 +153,14 @@ def _category_key(label: str) -> str | None:
         if kw in low:
             return key
     return None
+
+
+def _price_range(cfg: dict, key: str | None) -> tuple[int, int] | None:
+    if not key:
+        return None
+    ranges = cfg.get("price_ranges") or {}
+    r = ranges.get(key) or _DEFAULT_PRICE_RANGE.get(key)
+    return (int(r[0]), int(r[1])) if r else None
 
 
 def _max_numeric_button(message) -> str | None:
@@ -320,11 +359,17 @@ class FarmModule:
 
     async def check_containers(self) -> str:
         """Открыть магазин контейнеров и разобрать ответ:
-        - «раскуплены, след. через X» -> просто ждать это время;
+        - «раскуплены, след. через X», X больше early_start -> просто ждать (с запасом
+          на ранний старт — см. ниже), проверить снова заранее, а не ровно в рестоке;
+        - «раскуплены, след. через X», X меньше early_start (рестока скоро) -> НЕ ждать
+          кулдаун целиком, а начать опрашивать магазин заранее: редко (pre_restock_interval),
+          пока не подойдёт расчётное время рестока, и часто (retry_interval) после —
+          ровно в момент рестока игровой бот перегружен и не отвечает, ловить его нужно
+          с запасом, а не начинать долбить холодным стартом именно в этот момент;
         - меню магазина (категории) -> купить по preferred_categories/тумблерам;
         - нет ответа вообще -> игровой бот перегружен (частая ситуация на рестоке) —
           ЭТО можно долбить: повтор открытия с периодичностью retry_interval, не
-          дольше retry_window;
+          дольше retry_window (после расчётного рестока, если он известен);
         - анти-бот капча (картинка-пример) -> бот её НЕ решает и НЕ долбит магазин
           повторно (там ограниченное число попыток на капчу, спам может их сжечь) —
           шлёт владельцу интерактивный алерт с выбором категории и ждёт, пока он
@@ -339,6 +384,8 @@ class FarmModule:
         retry_interval = max(3, int(cfg.get("retry_interval", 10)))
         retry_window = max(retry_interval, int(cfg.get("retry_window", 600)))
         unknown_retry = int(cfg.get("unknown_retry", 600))
+        early_start = max(0, int(cfg.get("early_start", 1800)))
+        pre_restock_interval = max(5, int(cfg.get("pre_restock_interval", 60)))
 
         deadline = time.time() + retry_window
         attempt = 0
@@ -349,8 +396,20 @@ class FarmModule:
 
                 if kind == "sold_out":
                     cd = parse_shop_cooldown(text)
+                    if cd is not None and cd <= early_start:
+                        # рестока осталось меньше early_start — переходим в режим опроса
+                        # вместо того, чтобы ждать полный кулдаун и упереться в перегруженного
+                        # бота ровно в момент рестока
+                        restock_at = time.time() + cd
+                        deadline = max(deadline, restock_at + retry_window)
+                        interval = retry_interval if cd <= 0 else pre_restock_interval
+                        self.last_container = f"⏳ рестока через {fmt_duration(cd)}, опрашиваю ({clock()})"
+                        if time.time() >= deadline:
+                            break
+                        await asyncio.sleep(interval)
+                        continue
                     delay = cd if cd is not None else unknown_retry
-                    self.container_next_ts = time.time() + delay + BUFFER_SEC
+                    self.container_next_ts = time.time() + max(0, delay - early_start) + BUFFER_SEC
                     self.last_container = f"⏳ раскуплены, след. через {fmt_duration(delay)} ({clock()} {today_msk()})"
                     return self.last_container
 
@@ -410,13 +469,14 @@ class FarmModule:
         cfg = self.container_cfg
         bot = cfg.get("bot") or CARDS_BOT
         unknown_retry = int(cfg.get("unknown_retry", 600))
+        early_start = max(0, int(cfg.get("early_start", 1800)))
         try:
             kind, reply, text = await self._probe_shop(cfg)
 
             if kind == "sold_out":
                 cd = parse_shop_cooldown(text)
                 delay = cd if cd is not None else unknown_retry
-                self.container_next_ts = time.time() + delay + BUFFER_SEC
+                self.container_next_ts = time.time() + max(0, delay - early_start) + BUFFER_SEC
                 self.last_container = f"⏳ раскуплены, след. через {fmt_duration(delay)} ({clock()} {today_msk()})"
             elif kind == "shop":
                 eff_cfg = cfg
@@ -489,16 +549,38 @@ class FarmModule:
                 await asyncio.sleep(retry_interval)
         return False
 
-    async def _buy_category(self, bot: str, shop_msg, category_label: str, cfg: dict) -> tuple[bool, str]:
+    async def _check_balance(self) -> int | None:
+        bal = await self._send_and_wait(CARDS_BOT, BALANCE_WORD, timeout=15)
+        return parse_points(getattr(bal, "text", None) or getattr(bal, "caption", None))
+
+    async def _buy_category(
+        self, bot: str, shop_msg, category_label: str, cfg: dict, balance: int | None,
+    ) -> tuple[bool, str, int]:
+        """Возвращает (успех, инфо-строка, потрачено ТОчек)."""
         if not _find_button(shop_msg, category_label):
-            return False, ""
+            return False, "", 0
         detail = await self._click_step(bot, shop_msg, category_label, cfg, timeout=15)
         if detail is None:
-            return False, f"{category_label}: нет ответа на выбор категории"
+            return False, f"{category_label}: нет ответа на выбор категории", 0
         dtext = getattr(detail, "text", None) or getattr(detail, "caption", None) or ""
         remaining = parse_remaining(dtext)
         if not remaining or remaining <= 0:
-            return False, ""  # лимит категории исчерпан — не ошибка, просто нечего брать
+            return False, "", 0  # лимит категории исчерпан — не ошибка, просто нечего брать
+
+        key = _category_key(category_label)
+        unit_price = parse_unit_price(dtext)
+        price_range = _price_range(cfg, key)
+        if unit_price and price_range and not (price_range[0] * 0.5 <= unit_price <= price_range[1] * 1.3):
+            # цена сильно не похожа на ожидаемую для категории — вероятно баг парсинга,
+            # безопаснее пропустить и позвать владельца, чем спустить неизвестную сумму
+            await self._notify_price_mismatch(category_label, unit_price)
+            return False, f"{category_label}: подозрительная цена {unit_price}, пропускаю", 0
+
+        if unit_price and balance is not None:
+            affordable = balance // unit_price
+            if affordable <= 0:
+                return False, f"{category_label}: не хватает баланса (цена {unit_price}, баланс {balance})", 0
+            remaining = min(remaining, affordable)
 
         single_btn = cfg.get("single_button", "купить 1")
         bulk_btn = cfg.get("bulk_button", "купить оптом")
@@ -509,40 +591,65 @@ class FarmModule:
         else:
             qty_msg = await self._click_step(bot, detail, bulk_btn, cfg, timeout=15)
             if qty_msg is None:
-                return False, f"{category_label}: нет ответа на «купить оптом»"
+                return False, f"{category_label}: нет ответа на «купить оптом»", 0
             qty_btn = _find_button(qty_msg, str(remaining)) or _max_numeric_button(qty_msg)
             if not qty_btn:
-                return False, f"{category_label}: не нашёл кнопку количества"
+                return False, f"{category_label}: не нашёл кнопку количества", 0
             step = await self._click_step(bot, qty_msg, qty_btn, cfg, timeout=15)
 
         if step is None:
-            return False, f"{category_label}: нет ответа после выбора количества"
+            return False, f"{category_label}: нет ответа после выбора количества", 0
+
+        step_text = getattr(step, "text", None) or getattr(step, "caption", None) or ""
+        total_price = parse_total_price(step_text) or (unit_price * remaining if unit_price else 0)
 
         # если это экран подтверждения — жмём; если покупка уже прошла сама — не мешаем
         if _find_button(step, confirm_btn):
             if not await self._click_confirm(step, confirm_btn, cfg):
-                return False, f"{category_label}: не подтвердилась покупка"
+                return False, f"{category_label}: не подтвердилась покупка", 0
 
         self._bump("containers_bought", remaining)
-        return True, f"{remaining} шт. ({category_label})"
+        return True, f"{remaining} шт. ({category_label}, ~{total_price:,} ТОчек)".replace(",", " "), total_price
 
     async def _buy_containers(self, bot: str, shop_msg, cfg: dict) -> str:
         """Проходит preferred_categories по порядку, покупая максимум доступного
-        в каждой разрешённой (тумблерами containers_buy_*) категории."""
+        (в пределах баланса) в каждой разрешённой (тумблерами containers_buy_*)
+        категории. Баланс проверяется один раз в начале и уменьшается по ходу
+        покупок — чтобы не потратить на дорогие/донатные больше, чем реально есть."""
         prefs = cfg.get("preferred_categories") or ["Донатный", "Дорогой", "Бюджетный"]
         results = []
         msg = shop_msg
         open_cmd = cfg.get("open_command") or CONTAINER_WORD
+        balance = await self._check_balance()
         for label in prefs:
             if not self._category_allowed(label):
                 continue
-            ok, info = await self._buy_category(bot, msg, label, cfg)
+            if balance is not None and balance <= 0:
+                break
+            ok, info, spent = await self._buy_category(bot, msg, label, cfg, balance)
             if ok:
                 results.append(info)
+                if balance is not None:
+                    balance -= spent
                 refreshed = await self._send_and_wait(bot, open_cmd, timeout=20)
                 if refreshed is not None:
                     msg = refreshed
         return "; ".join(results)
+
+    async def _notify_price_mismatch(self, category_label: str, unit_price: int) -> None:
+        owner_id = self.account.get("owner_id")
+        if not owner_id or not self.account.get("alerts_enabled", True):
+            return
+        text = (
+            f"⚠️ Магазин контейнеров — «{self.name}»: цена «{category_label}» "
+            f"выглядит подозрительно ({unit_price:,} ТОчек), пропустил категорию "
+            f"на всякий случай — проверь вручную.".replace(",", " ")
+        )
+        if self.alert_fn:
+            try:
+                await self.alert_fn(owner_id, text, None)
+            except Exception as e:  # noqa: BLE001
+                print(f"[{self.name}] не удалось отправить алерт о цене: {e}")
 
     def _captcha_markup(self, cfg: dict) -> InlineKeyboardMarkup:
         """Кнопки выбора категории прямо в алерте — жмёшь, когда сам решил капчу
@@ -562,7 +669,7 @@ class FarmModule:
 
     async def _notify_owner_captcha(self, cfg: dict, shop_text: str | None, reason: str = "captcha") -> None:
         owner_id = self.account.get("owner_id")
-        if not owner_id:
+        if not owner_id or not self.account.get("alerts_enabled", True):
             return
         alert = cfg.get("captcha_alert_text", "КАПЧА")
         preview = f"\n\n«{shop_text[:300]}»" if shop_text else ""
@@ -581,17 +688,16 @@ class FarmModule:
             head = f"⚠️ Магазин контейнеров прислал неожиданный ответ — «{self.name}». Посмотри вручную."
         text = f"{head}{preview}\n\nЧто делать дальше — выбери:"
         markup = self._captcha_markup(cfg)
-        if self.alert_fn:
-            try:
-                await self.alert_fn(owner_id, text, markup)
-                return
-            except Exception as e:  # noqa: BLE001
-                print(f"[{self.name}] не удалось отправить интерактивный алерт: {e}")
-        # запасной путь, если alert_fn почему-то не подключен — просто текст от аккаунта
+        # ТОЛЬКО через управляющего бота: фарм-аккаунт (phoneget) во время автоматизации
+        # может быть ограничен Telegram в отправке новых личных сообщений («в муте»),
+        # так что слать алерт именно тогда, когда он важнее всего, через него ненадёжно
+        if not self.alert_fn:
+            print(f"[{self.name}] alert_fn не подключен — алерт не отправлен: {text[:80]}")
+            return
         try:
-            await self.client.send_message(owner_id, text)
+            await self.alert_fn(owner_id, text, markup)
         except Exception as e:  # noqa: BLE001
-            print(f"[{self.name}] не удалось оповестить владельца: {e}")
+            print(f"[{self.name}] не удалось отправить алерт через управляющего бота: {e}")
 
     # ---------- действия ----------
     async def collect_mining(self) -> bool:

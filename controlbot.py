@@ -78,7 +78,7 @@ class ControlBot:
             # 1) закрепляем снизу постоянную кнопку «/start» (один раз хватит, дальше видна всегда)
             await m.reply(_WELCOME_TEXT, reply_markup=_START_KEYBOARD)
             # 2) сама панель — с инлайн-кнопками
-            await m.reply("🤖 <b>Панель управления</b>", reply_markup=self._main_menu())
+            await m.reply("🤖 <b>Панель управления</b>", reply_markup=self._main_menu(m.from_user.id))
 
         @self.app.on_message(filters.private & auth & ~filters.command("start"))
         async def _text(_c, m: Message):
@@ -97,11 +97,16 @@ class ControlBot:
         return acc if acc and acc.get("owner_id") == uid else None
 
     # ============ меню ============
-    def _main_menu(self) -> InlineKeyboardMarkup:
+    def _is_creator(self, uid: int) -> bool:
+        return uid in self.admin_ids
+
+    def _main_menu(self, uid: int = 0) -> InlineKeyboardMarkup:
         rows = [[_btn("📋 Мои аккаунты", "list")]]
         repo_url = self.settings.get("repo_url")
         if repo_url:
             rows.append([InlineKeyboardButton("📖 Как развернуть свою копию", url=repo_url)])
+        if self._is_creator(uid):
+            rows.append([_btn("📣 Рассылка всем пользователям", "broadcast")])
         return InlineKeyboardMarkup(rows)
 
     def _accounts_menu(self, uid: int) -> InlineKeyboardMarkup:
@@ -119,10 +124,11 @@ class ControlBot:
     def _account_menu(self, acc: dict) -> InlineKeyboardMarkup:
         aid = acc["id"]
         en = acc.get("enabled", True)
+        al = "вкл ✅" if acc.get("alerts_enabled", True) else "выкл ❌"
         return InlineKeyboardMarkup([
             [_btn("⏸ Выключить" if en else "▶️ Включить", f"toggle:{aid}")],
             [_btn("🌾 Фарм карточек", f"farm:{aid}"), _btn("📨 Автоотправка", f"autosend:{aid}")],
-            [_btn("☎️ Телефон", f"phone:{aid}")],
+            [_btn("☎️ Телефон", f"phone:{aid}"), _btn(f"🔔 Алерты: {al}", f"talerts:{aid}")],
             [_btn("✏️ Имя", f"rename:{aid}"), _btn("🗑 Удалить", f"del:{aid}")],
             [_btn("🔄 Обновить", f"acc:{aid}"), _btn("⬅️ Назад", "list")],
         ])
@@ -301,7 +307,7 @@ class ControlBot:
         try:
             if data == "home":
                 self.states.pop(uid, None)
-                await q.message.edit_text("🤖 <b>Панель управления</b>", reply_markup=self._main_menu())
+                await q.message.edit_text("🤖 <b>Панель управления</b>", reply_markup=self._main_menu(uid))
                 return await q.answer()
             if data == "list":
                 await q.message.edit_text("📋 <b>Мои аккаунты</b>", reply_markup=self._accounts_menu(uid))
@@ -316,6 +322,29 @@ class ControlBot:
                 return await q.answer()
             if data == "allphones":
                 await self._start_all_phones(q, uid)
+                return
+            if data == "broadcast":
+                if not self._is_creator(uid):
+                    return await q.answer("Только для создателя бота", show_alert=True)
+                self.states[uid] = {"flow": "broadcast", "step": "text"}
+                await q.message.edit_text(
+                    "📣 Текст рассылки для ВСЕХ пользователей бота "
+                    "(например, кратко что изменилось в обновлении):")
+                return await q.answer()
+            if data == "bcast_cancel":
+                self.states.pop(uid, None)
+                await q.message.edit_text("❌ Рассылка отменена.", reply_markup=self._main_menu(uid))
+                return await q.answer()
+            if data == "bcast_go":
+                if not self._is_creator(uid):
+                    return await q.answer("Только для создателя бота", show_alert=True)
+                state = self.states.get(uid)
+                text = (state or {}).get("text")
+                if not text:
+                    return await q.answer("Текст рассылки потерян, начни заново", show_alert=True)
+                self.states.pop(uid, None)
+                await q.answer("⏳ Рассылаю...")
+                asyncio.create_task(self._run_broadcast(q, uid, text))
                 return
 
             # дальше всё про конкретный аккаунт — проверяем владение
@@ -367,6 +396,8 @@ class ControlBot:
                                           reply_markup=self._targets_menu(acc))
             elif data.startswith("toggle:"):
                 await self._toggle(q, acc, "enabled", redisplay="account")
+            elif data.startswith("talerts:"):
+                await self._toggle(q, acc, "alerts_enabled", redisplay="account")
             elif data.startswith("tfarm:"):
                 await self._toggle(q, acc, "farm_enabled", redisplay="farm")
             elif data.startswith("tautosend:"):
@@ -608,6 +639,20 @@ class ControlBot:
         await self._safe_edit(q, self._account_text(acc) + f"\n\n🔄 Результат: {result}",
                               self._account_menu(acc))
 
+    async def _run_broadcast(self, q: CallbackQuery, uid: int, text: str) -> None:
+        owners = {a.get("owner_id") for a in self.storage.accounts if a.get("owner_id")}
+        sent, failed = 0, 0
+        for owner_id in owners:
+            try:
+                await self.app.send_message(owner_id, f"📣 {text}")
+                sent += 1
+            except Exception as e:  # noqa: BLE001
+                failed += 1
+                print(f"[broadcast] не удалось отправить {owner_id}: {e}")
+        await self._safe_edit(
+            q, f"📣 Рассылка готова: доставлено {sent}, не удалось {failed}.",
+            self._main_menu(uid))
+
     async def _run_task_now(self, q: CallbackQuery, aid: int, tid: int) -> None:
         w = self.manager.workers.get(aid)
         res = await w.run_task_now(tid) if w else "аккаунт не запущен"
@@ -638,6 +683,8 @@ class ControlBot:
             await self._handle_add(m, state)
         elif state.get("flow") == "addtask":
             await self._handle_addtask(m, state)
+        elif state.get("flow") == "broadcast":
+            await self._handle_broadcast(m, state)
 
     async def _handle_set(self, m: Message, state: dict) -> None:
         uid = m.from_user.id
@@ -681,6 +728,22 @@ class ControlBot:
         self.storage.save()
         self.states.pop(uid, None)
         await m.reply(self._account_text(acc), reply_markup=self._account_menu(acc))
+
+    async def _handle_broadcast(self, m: Message, state: dict) -> None:
+        uid = m.from_user.id
+        if not self._is_creator(uid):
+            self.states.pop(uid, None)
+            return
+        text = m.text.strip()
+        if not text:
+            await m.reply("Пустой текст. Ещё раз:")
+            return
+        state["text"] = text
+        owners = {a.get("owner_id") for a in self.storage.accounts if a.get("owner_id")}
+        await m.reply(
+            f"📣 Получат {len(owners)} пользователь(ей):\n\n{text}\n\nОтправляем?",
+            reply_markup=InlineKeyboardMarkup([[
+                _btn("✅ Отправить всем", "bcast_go"), _btn("❌ Отмена", "bcast_cancel")]]))
 
     async def _handle_addtask(self, m: Message, state: dict) -> None:
         uid = m.from_user.id
