@@ -144,8 +144,12 @@ class Manager:
             self._trade_locks[acc_id] = lock
         return lock
 
-    async def run_trade(self, farm_id: int) -> str:
+    async def run_trade(self, farm_id: int, target_override: str | None = None) -> str:
         """Слить телефоны фарма на trade_target. Повтор, пока коллекция > repeat_threshold.
+
+        target_override — разовый получатель для ручного трейда (кнопка «🔄 Трейд с
+        человеком» в ▶️ Действия), независимо от настроенного trade_target. None —
+        обычный авто-трейд по настроенному получателю.
 
         Если получатель — тоже локально управляемый аккаунт (main), он одновременно
         может быть только в ОДНОМ обмене (обе стороны занимают клиент). Поэтому
@@ -157,7 +161,7 @@ class Manager:
         farm = self.workers.get(farm_id)
         if not farm or not farm.running:
             return "фарм-аккаунт не запущен"
-        target = (farm.account.get("trade_target") or "").strip()
+        target = (target_override or farm.account.get("trade_target") or "").strip()
         if not target:
             return "не задан получатель трейда — задайте в 🎯 Получатели"
 

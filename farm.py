@@ -336,26 +336,46 @@ class FarmModule:
                 self.container_next_ts = time.time() + 60
                 await asyncio.sleep(5)
 
-    async def _probe_shop(self, cfg: dict) -> tuple[str, object, str | None]:
-        """Один запрос открытия магазина. Возвращает (kind, reply, text), где kind —
-        'sold_out' | 'shop' | 'captcha' | 'none' (бот не ответил) | 'unknown'."""
-        bot = cfg.get("bot") or CARDS_BOT
-        open_cmd = cfg.get("open_command") or CONTAINER_WORD
+    def _classify_shop_reply(self, cfg: dict, reply, text: str | None) -> str:
+        low = (text or "").lower()
         sold_out_marker = (cfg.get("sold_out_marker") or "раскуплены").lower()
         captcha_marker = (cfg.get("captcha_marker") or "анти-бот защита").lower()
         shop_marker = (cfg.get("shop_marker") or "магазин контейнеров").lower()
+        if sold_out_marker in low:
+            return "sold_out"
+        if shop_marker in low or any(_find_button(reply, kw) for kw in ("бюджет", "донат", "дорог")):
+            return "shop"
+        if captcha_marker in low:
+            return "captcha"
+        return "unknown"
+
+    async def _probe_shop(self, cfg: dict) -> tuple[str, object, str | None]:
+        """Один запрос открытия магазина (отправляет команду заново). Возвращает
+        (kind, reply, text), где kind — 'sold_out' | 'shop' | 'captcha' |
+        'none' (бот не ответил) | 'unknown'."""
+        bot = cfg.get("bot") or CARDS_BOT
+        open_cmd = cfg.get("open_command") or CONTAINER_WORD
         reply = await self._send_and_wait(bot, open_cmd, timeout=20)
         text = (getattr(reply, "text", None) or getattr(reply, "caption", None)) if reply else None
-        low = (text or "").lower()
         if reply is None:
             return "none", reply, text
-        if sold_out_marker in low:
-            return "sold_out", reply, text
-        if shop_marker in low or any(_find_button(reply, kw) for kw in ("бюджет", "донат", "дорог")):
-            return "shop", reply, text
-        if captcha_marker in low:
-            return "captcha", reply, text
-        return "unknown", reply, text
+        return self._classify_shop_reply(cfg, reply, text), reply, text
+
+    async def _probe_shop_refresh(self, cfg: dict, prev_reply) -> tuple[str, object, str | None]:
+        """Как _probe_shop, но вместо повторной отправки команды открытия магазина
+        жмёт кнопку «🔄 Обновить» на предыдущем ответе (меньше сообщений в чате с
+        игровым ботом на каждой минуте опроса). Если такой кнопки нет или клик не
+        удался — откатывается на обычную отправку команды."""
+        bot = cfg.get("bot") or CARDS_BOT
+        refresh_label = cfg.get("refresh_button") or "обновить"
+        btn = _find_button(prev_reply, refresh_label)
+        if not btn or not await self._try_click(prev_reply, btn):
+            return await self._probe_shop(cfg)
+        reply = await self._wait_next(bot, timeout=15)
+        if reply is None:
+            return "none", reply, None
+        text = getattr(reply, "text", None) or getattr(reply, "caption", None)
+        return self._classify_shop_reply(cfg, reply, text), reply, text
 
     async def check_containers(self) -> str:
         """Открыть магазин контейнеров и разобрать ответ:
@@ -375,6 +395,15 @@ class FarmModule:
           шлёт владельцу интерактивный алерт с выбором категории и ждёт, пока он
           сам решит капчу и нажмёт кнопку (resume_container_check);
         - что-то совсем незнакомое -> так же алерт владельцу и стоп.
+
+        Опрос в режиме ожидания рестока жмёт кнопку «🔄 Обновить» на уже полученном
+        сообщении вместо повторной отправки команды открытия магазина (см.
+        _probe_shop_refresh) — реже пишет игровому боту. Кроме того, за
+        restock_alert_before секунд до расчётного рестока (по умолчанию 20 мин)
+        владельцу шлётся разовый алерт через управляющего бота с оставшимся временем
+        (если к моменту первой проверки времени уже меньше — в алерте уйдёт фактический
+        остаток, а не ровно 20 мин).
+
         Используется циклом и кнопкой «Проверить сейчас». Возвращает last_container."""
         if not self.client or not self.running:
             self.last_container = "аккаунт не запущен"
@@ -386,23 +415,39 @@ class FarmModule:
         unknown_retry = int(cfg.get("unknown_retry", 600))
         early_start = max(0, int(cfg.get("early_start", 1800)))
         pre_restock_interval = max(5, int(cfg.get("pre_restock_interval", 60)))
+        alert_before = max(0, int(cfg.get("restock_alert_before", 1200)))
 
         deadline = time.time() + retry_window
         attempt = 0
+        prev_reply = None
         try:
             while True:
                 attempt += 1
-                kind, reply, text = await self._probe_shop(cfg)
+                if prev_reply is not None:
+                    kind, reply, text = await self._probe_shop_refresh(cfg, prev_reply)
+                else:
+                    kind, reply, text = await self._probe_shop(cfg)
+                if reply is not None:
+                    prev_reply = reply
 
                 if kind == "sold_out":
                     cd = parse_shop_cooldown(text)
+                    if cd is not None:
+                        if cd <= alert_before:
+                            if not self._container_alert_sent:
+                                self._container_alert_sent = True
+                                await self._notify_restock_soon(cd)
+                        else:
+                            self._container_alert_sent = False
                     if cd is not None and cd <= early_start:
                         # рестока осталось меньше early_start — переходим в режим опроса
                         # вместо того, чтобы ждать полный кулдаун и упереться в перегруженного
                         # бота ровно в момент рестока
                         restock_at = time.time() + cd
                         deadline = max(deadline, restock_at + retry_window)
-                        interval = retry_interval if cd <= 0 else pre_restock_interval
+                        # реже (раз в минуту), пока не подойдёт минута до рестока — и часто
+                        # (retry_interval) в последнюю минуту и после расчётного времени
+                        interval = retry_interval if cd <= 60 else pre_restock_interval
                         self.last_container = f"⏳ рестока через {fmt_duration(cd)}, опрашиваю ({clock()})"
                         if time.time() >= deadline:
                             break
@@ -553,6 +598,15 @@ class FarmModule:
         bal = await self._send_and_wait(CARDS_BOT, BALANCE_WORD, timeout=15)
         return parse_points(getattr(bal, "text", None) or getattr(bal, "caption", None))
 
+    async def fetch_balance_info(self) -> str:
+        """«такс» -> сырой ответ профиля (очки, телефоны в коллекции и т.п.),
+        как прислал игровой бот — используется кнопкой «🧾 Такс» в карточке аккаунта."""
+        if not self.client or not self.running:
+            return "аккаунт не запущен"
+        reply = await self._send_and_wait(CARDS_BOT, BALANCE_WORD, timeout=15)
+        text = (getattr(reply, "text", None) or getattr(reply, "caption", None)) if reply else None
+        return text or "⚠️ нет ответа"
+
     async def _buy_category(
         self, bot: str, shop_msg, category_label: str, cfg: dict, balance: int | None,
     ) -> tuple[bool, str, int]:
@@ -650,6 +704,20 @@ class FarmModule:
                 await self.alert_fn(owner_id, text, None)
             except Exception as e:  # noqa: BLE001
                 print(f"[{self.name}] не удалось отправить алерт о цене: {e}")
+
+    async def _notify_restock_soon(self, cd: int) -> None:
+        """Разовый алерт «ресток скоро» — за restock_alert_before секунд до расчётного
+        рестока (или сразу с фактическим остатком, если он уже меньше на момент проверки)."""
+        owner_id = self.account.get("owner_id")
+        if not owner_id or not self.account.get("alerts_enabled", True):
+            return
+        text = f"⏰ Магазин контейнеров — «{self.name}»: ресток через {fmt_duration(cd)}."
+        if not self.alert_fn:
+            return
+        try:
+            await self.alert_fn(owner_id, text, None)
+        except Exception as e:  # noqa: BLE001
+            print(f"[{self.name}] не удалось отправить алерт о рестоке: {e}")
 
     def _captcha_markup(self, cfg: dict) -> InlineKeyboardMarkup:
         """Кнопки выбора категории прямо в алерте — жмёшь, когда сам решил капчу
@@ -775,6 +843,26 @@ class FarmModule:
             raise
         except Exception as e:  # noqa: BLE001
             self.last_payout = f"ошибка вывода: {e}"
+
+    async def manual_pay(self, target: str, amount: int) -> str:
+        """Ручной разовый перевод очков произвольному получателю произвольной суммой —
+        независимо от настроенного payout_target/авто-вывода. Полезно для твинков
+        (перекинуть очки с одного своего аккаунта на другой вручную)."""
+        if not self.client or not self.running:
+            return "аккаунт не запущен"
+        if self._trade_mode:
+            return "идёт трейд — попробуй чуть позже"
+        bal = await self._send_and_wait(CARDS_BOT, BALANCE_WORD, timeout=15)
+        balance = parse_points(getattr(bal, "text", None) or getattr(bal, "caption", None))
+        if balance is not None and amount > balance:
+            return f"⚠️ не хватает очков (баланс {balance}, запрошено {amount})"
+        pay = await self._send_and_wait(CARDS_BOT, f"/pay {target} {amount}")
+        if await self._try_click(pay, PAY_CONFIRM_BUTTON):
+            self._bump("paid", amount)
+            return f"✅ переведено {amount} -> {target} ({clock()} {today_msk()})"
+        if pay is None:
+            return "⚠️ нет ответа на /pay"
+        return "⚠️ кнопка «Подтвердить» не найдена — возможно перевод не прошёл"
 
     # ---------- инфо для меню ----------
     def card_remaining(self) -> str:

@@ -114,7 +114,8 @@ class ControlBot:
         for acc in self._my_accounts(uid):
             w = self.manager.workers.get(acc["id"])
             mark = "🟢" if (w and w.running and acc.get("enabled", True)) else "🔴"
-            rows.append([_btn(f"{mark} {acc.get('name')}", f"acc:{acc['id']}")])
+            crown = "👑 " if acc.get("is_main") else ""
+            rows.append([_btn(f"{mark} {crown}{acc.get('name')}", f"acc:{acc['id']}")])
         rows.append([_btn("➕ По номеру", "add_phone"), _btn("➕ Session", "add_session")])
         if self._my_accounts(uid):
             rows.append([_btn("☎️ Показать все номера", "allphones")])
@@ -128,7 +129,7 @@ class ControlBot:
         return InlineKeyboardMarkup([
             [_btn("⏸ Выключить" if en else "▶️ Включить", f"toggle:{aid}")],
             [_btn("🌾 Фарм карточек", f"farm:{aid}"), _btn("📨 Автоотправка", f"autosend:{aid}")],
-            [_btn("☎️ Телефон", f"phone:{aid}"), _btn(f"🔔 Алерты: {al}", f"talerts:{aid}")],
+            [_btn("🧾 Такс", f"taxx:{aid}"), _btn(f"🔔 Алерты: {al}", f"talerts:{aid}")],
             [_btn("✏️ Имя", f"rename:{aid}"), _btn("🗑 Удалить", f"del:{aid}")],
             [_btn("🔄 Обновить", f"acc:{aid}"), _btn("⬅️ Назад", "list")],
         ])
@@ -220,6 +221,8 @@ class ControlBot:
             [_btn("⛏ Собрать майнинг сейчас", f"mine:{aid}")],
             [_btn("🔄 Слить телефоны (по 🎯 получателю трейда)", f"exch:{aid}")],
             [_btn("📦 Проверить магазин контейнеров", f"checkcont:{aid}")],
+            [_btn("💸 Перевести человеку", f"paystart:{aid}")],
+            [_btn("🤝 Трейд с человеком", f"tradestart:{aid}")],
             [_btn("⬅️ Назад", f"farm:{aid}")],
         ])
 
@@ -267,37 +270,31 @@ class ControlBot:
 
     # ============ текст карточки ============
     def _account_text(self, acc: dict) -> str:
+        """Свёрнутая карточка: только «через сколько что» по включённым фичам —
+        выключенные показывают 🔴 выкл вместо устаревшего last_* текста (не путать
+        «выключено» с «готово»). Подробности отдельной фичи — кнопки в ▶️ Действия."""
         w = self.manager.workers.get(acc["id"])
-        def fl(f, d=True):
-            return "вкл" if acc.get(f, d) else "выкл"
-        lines = [
-            f"<b>{acc.get('name')}</b>  (id <code>{acc['id']}</code>)",
-            f"Статус: {w.status if w else 'остановлен'}",
-            f"Общий: {fl('enabled')}  |  🌾 Фарм: {fl('farm_enabled')}  |  "
-            f"📨 Автоотправка: {fl('autosend_enabled')}",
-            "",
-        ]
-        if w:
-            lines += [
-                f"🃏 Карточки: до след. <b>{w.card_remaining()}</b>\n   {w.last_card}",
-                f"🎰 Рулетка: до след. <b>{w.roulette_remaining()}</b>\n   {w.last_roulette}",
-                f"⛏ Майнинг ({acc.get('mining_time', '01:00')} МСК): через <b>{w.mining_remaining()}</b>"
-                f"\n   {w.last_mining}",
-                f"🎁 Ежедневная награда: {w.last_daily}",
-                f"💸 Вывод: {w.last_payout}",
-                f"🔄 Обмен: {w.last_exchange}",
-                f"📦 Магазин: до след. <b>{w.container_remaining()}</b>\n   {w.last_container}",
-                f"💬 Последняя .команда: {w.last_self_cmd}",
-                "",
-                f"📊 Всего: {w.stats_line()}",
-            ]
-        else:
-            st = acc.get("stats", {})
-            lines.append(
-                f"📊 Всего: 📱 {st.get('phones', 0)} (⭐{st.get('good_phones', 0)}) | "
-                f"🎰 {st.get('roulette', 0)} | ⛏ {st.get('mining', 0)} | 🎁 {st.get('daily', 0)} | "
-                f"💸 {st.get('paid', 0)} | 🔄 {st.get('exchanged', 0)} | 📦 {st.get('containers_bought', 0)}"
-            )
+        crown = "👑 " if acc.get("is_main") else ""
+        name = f"{crown}<b>{acc.get('name')}</b>"
+
+        if not acc.get("enabled", True):
+            return f"🔴 {name}\nАккаунт выключен."
+        if not w or not w.running:
+            return f"🔴 {name}\nАккаунт не запущен."
+
+        farm_on = acc.get("farm_enabled", True)
+
+        def feat(emoji: str, label: str, field: str, remaining_fn, default: bool = True) -> str:
+            if not farm_on or not acc.get(field, default):
+                return f"{emoji} {label}: 🔴 выкл"
+            return f"{emoji} {label}: через <b>{remaining_fn()}</b>"
+
+        lines = [f"🟢 {name}", ""]
+        lines.append(feat("🃏", "Карточка", "card_enabled", w.card_remaining))
+        lines.append(feat("🎰", "Рулетка", "roulette_enabled", w.roulette_remaining))
+        lines.append(feat("⛏", "Майнинг", "mining_enabled", w.mining_remaining))
+        lines.append(feat("🎁", "Награда", "daily_reward_enabled", w.mining_remaining))
+        lines.append(feat("📦", "Конты", "containers_enabled", w.container_remaining, default=False))
         return "\n".join(lines)
 
     # ============ callback ============
@@ -443,10 +440,21 @@ class ControlBot:
                 await self._collect_mining(q, aid)
             elif data.startswith("exch:"):
                 await self._start_trade(q, aid)
-            elif data.startswith("phone:"):
-                await self._start_show_phone(q, aid)
+            elif data.startswith("taxx:"):
+                await self._start_show_balance(q, aid)
             elif data.startswith("checkcont:"):
                 await self._check_containers(q, aid)
+            elif data.startswith("paystart:"):
+                self.states[uid] = {"flow": "manualpay", "acc_id": aid, "step": "target"}
+                await q.message.edit_text(
+                    "💸 Перевод очков человеку.\n"
+                    "Введи получателя — <b>@username</b> или <b>числовой id</b>:")
+            elif data.startswith("tradestart:"):
+                self.states[uid] = {"flow": "manualtrade", "acc_id": aid, "step": "target"}
+                await q.message.edit_text(
+                    "🤝 Трейд с человеком.\n"
+                    "Введи получателя — <b>@username</b> или <b>числовой id</b> "
+                    "(разово, независимо от настроенного получателя трейда):")
             elif data.startswith("capgo:"):
                 cat = data.split(":")[2]
                 w = self.manager.workers.get(aid)
@@ -576,34 +584,18 @@ class ControlBot:
         await self._safe_edit(q, self._account_text(acc) + f"\n\n📦 {result}",
                               self._account_menu(acc))
 
-    async def _start_show_phone(self, q: CallbackQuery, aid: int) -> None:
+    async def _start_show_balance(self, q: CallbackQuery, aid: int) -> None:
         w = self.manager.workers.get(aid)
         if not w or not w.running:
             return await q.answer("Аккаунт не запущен", show_alert=True)
-        await q.answer("⏳ Запрашиваю у Telegram...")
-        asyncio.create_task(self._run_show_phone(q, aid, w))
+        await q.answer("⏳ Запрашиваю такс...")
+        asyncio.create_task(self._run_show_balance(q, aid, w))
 
-    async def _run_show_phone(self, q: CallbackQuery, aid: int, w) -> None:
-        info = await w.get_account_info()
+    async def _run_show_balance(self, q: CallbackQuery, aid: int, w) -> None:
+        info = await w.fetch_balance_info()
         acc = self.storage.get(aid)
-        text = f"☎️ <b>{acc.get('name')}</b>\n\n{self._format_phone_info(info)}"
+        text = f"{self._account_text(acc)}\n\n🧾 <b>Такс:</b>\n{info}"
         await self._safe_edit(q, text, self._account_menu(acc))
-
-    @staticmethod
-    def _format_phone_info(info: dict | None) -> str:
-        if not info:
-            return "⚠️ не удалось получить (аккаунт не запущен)"
-        if info.get("error"):
-            return f"⚠️ ошибка: {info['error']}"
-        name = " ".join(filter(None, [info.get("first_name"), info.get("last_name")])) or "—"
-        uname = f"@{info['username']}" if info.get("username") else "—"
-        return (
-            f"Телефон: <code>+{info.get('phone') or '—'}</code>\n"
-            f"Имя: {name}\n"
-            f"Username: {uname}\n"
-            f"id: <code>{info.get('id')}</code>"
-            f"{' | Premium ⭐' if info.get('is_premium') else ''}"
-        )
 
     async def _start_all_phones(self, q: CallbackQuery, uid: int) -> None:
         accs = [a for a in self._my_accounts(uid) if self.manager.workers.get(a["id"])
@@ -685,6 +677,10 @@ class ControlBot:
             await self._handle_addtask(m, state)
         elif state.get("flow") == "broadcast":
             await self._handle_broadcast(m, state)
+        elif state.get("flow") == "manualpay":
+            await self._handle_manual_pay(m, state)
+        elif state.get("flow") == "manualtrade":
+            await self._handle_manual_trade(m, state)
 
     async def _handle_set(self, m: Message, state: dict) -> None:
         uid = m.from_user.id
@@ -744,6 +740,70 @@ class ControlBot:
             f"📣 Получат {len(owners)} пользователь(ей):\n\n{text}\n\nОтправляем?",
             reply_markup=InlineKeyboardMarkup([[
                 _btn("✅ Отправить всем", "bcast_go"), _btn("❌ Отмена", "bcast_cancel")]]))
+
+    @staticmethod
+    def _parse_target(val: str) -> str | None:
+        bare = val.strip().lstrip("@").strip()
+        if not bare or " " in bare:
+            return None
+        return bare if bare.isdigit() else f"@{bare}"
+
+    async def _handle_manual_pay(self, m: Message, state: dict) -> None:
+        uid = m.from_user.id
+        acc = self._owned(uid, state["acc_id"])
+        if not acc:
+            self.states.pop(uid, None)
+            return
+        val = m.text.strip()
+        if state["step"] == "target":
+            target = self._parse_target(val)
+            if not target:
+                await m.reply("Нужен @username или числовой id, без пробелов. Ещё раз:")
+                return
+            state["target"] = target
+            state["step"] = "amount"
+            await m.reply("Сколько очков перевести (число)?")
+            return
+        if not val.isdigit() or int(val) <= 0:
+            await m.reply("Нужно положительное число очков. Ещё раз:")
+            return
+        amount = int(val)
+        target = state["target"]
+        self.states.pop(uid, None)
+        w = self.manager.workers.get(acc["id"])
+        if not w or not w.running:
+            await m.reply("⚠️ Аккаунт не запущен.", reply_markup=self._actions_menu(acc))
+            return
+        await m.reply(f"⏳ Перевожу {amount} -> {target}...")
+        asyncio.create_task(self._run_manual_pay(m, acc["id"], w, target, amount))
+
+    async def _run_manual_pay(self, m: Message, aid: int, w, target: str, amount: int) -> None:
+        result = await w.manual_pay(target, amount)
+        acc = self.storage.get(aid)
+        await m.reply(f"💸 {result}", reply_markup=self._actions_menu(acc))
+
+    async def _handle_manual_trade(self, m: Message, state: dict) -> None:
+        uid = m.from_user.id
+        acc = self._owned(uid, state["acc_id"])
+        if not acc:
+            self.states.pop(uid, None)
+            return
+        target = self._parse_target(m.text.strip())
+        if not target:
+            await m.reply("Нужен @username или числовой id, без пробелов. Ещё раз:")
+            return
+        self.states.pop(uid, None)
+        w = self.manager.workers.get(acc["id"])
+        if not w or not w.running:
+            await m.reply("⚠️ Аккаунт не запущен.", reply_markup=self._actions_menu(acc))
+            return
+        await m.reply(f"⏳ Запускаю трейд с {target} (это надолго)...")
+        asyncio.create_task(self._run_manual_trade(m, acc["id"], target))
+
+    async def _run_manual_trade(self, m: Message, aid: int, target: str) -> None:
+        result = await self.manager.run_trade(aid, target_override=target)
+        acc = self.storage.get(aid)
+        await m.reply(f"🤝 {result}", reply_markup=self._actions_menu(acc))
 
     async def _handle_addtask(self, m: Message, state: dict) -> None:
         uid = m.from_user.id

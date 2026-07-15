@@ -60,6 +60,7 @@ class _WorkerBase:
         self._trade_mode = False
         self._trade_queue: asyncio.Queue | None = None
         self._task_next: dict[int, float] = {}   # tid -> время следующего запуска
+        self._container_alert_sent = False       # чтобы не слать «ресток скоро» повторно на один и тот же ресток
 
         now = 0.0
         self.card_next_ts = now
