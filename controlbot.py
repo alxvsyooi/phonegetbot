@@ -217,14 +217,18 @@ class ControlBot:
 
     def _actions_menu(self, acc: dict) -> InlineKeyboardMarkup:
         aid = acc["id"]
-        return InlineKeyboardMarkup([
+        rows = [
             [_btn("⛏ Собрать майнинг сейчас", f"mine:{aid}")],
             [_btn("🔄 Слить телефоны (по 🎯 получателю трейда)", f"exch:{aid}")],
             [_btn("📦 Проверить магазин контейнеров", f"checkcont:{aid}")],
             [_btn("💸 Перевести человеку", f"paystart:{aid}")],
             [_btn("🤝 Трейд с человеком", f"tradestart:{aid}")],
-            [_btn("⬅️ Назад", f"farm:{aid}")],
-        ])
+        ]
+        if acc.get("is_main"):
+            rows.append([_btn(f"💰 Сумма слива твинкам: {acc.get('drain_amount', 0)}", f"setdrain:{aid}")])
+            rows.append([_btn("💧 Слить твинкам сейчас", f"draindo:{aid}")])
+        rows.append([_btn("⬅️ Назад", f"farm:{aid}")])
+        return InlineKeyboardMarkup(rows)
 
     @staticmethod
     def _task_sched(t: dict) -> str:
@@ -455,6 +459,15 @@ class ControlBot:
                     "🤝 Трейд с человеком.\n"
                     "Введи получателя — <b>@username</b> или <b>числовой id</b> "
                     "(разово, независимо от настроенного получателя трейда):")
+            elif data.startswith("setdrain:"):
+                if not acc.get("is_main"):
+                    return await q.answer("Только для 👑 главного аккаунта", show_alert=True)
+                self._ask(uid, aid, "drain_amount")
+                await q.message.edit_text(
+                    "💰 Сумма слива твинкам (очков КАЖДОМУ твинку). "
+                    "Пришли число, либо 0 чтобы отключить:")
+            elif data.startswith("draindo:"):
+                await self._start_drain(q, acc)
             elif data.startswith("capgo:"):
                 cat = data.split(":")[2]
                 w = self.manager.workers.get(aid)
@@ -631,6 +644,45 @@ class ControlBot:
         await self._safe_edit(q, self._account_text(acc) + f"\n\n🔄 Результат: {result}",
                               self._account_menu(acc))
 
+    @staticmethod
+    def _twink_ident(acc: dict) -> str:
+        """Числовой tg_id надёжнее username (тот можно сменить/потерять) — тот же
+        принцип, что и в Manager.copy_targets."""
+        if acc.get("tg_id"):
+            return str(acc["tg_id"])
+        return f"@{acc['username']}" if acc.get("username") else ""
+
+    async def _start_drain(self, q: CallbackQuery, acc: dict) -> None:
+        """💧 Слив: 👑 главный аккаунт рассылает фиксированную сумму (drain_amount)
+        каждому своему остальному аккаунту (твинку) — вручную по кнопке, обычно
+        перед контами. Сумма настраивается отдельной кнопкой «💰 Сумма слива»."""
+        if not acc.get("is_main"):
+            return await q.answer("Только для 👑 главного аккаунта", show_alert=True)
+        amount = int(acc.get("drain_amount", 0) or 0)
+        if amount <= 0:
+            return await q.answer("Сначала задай сумму слива (кнопка выше)", show_alert=True)
+        w = self.manager.workers.get(acc["id"])
+        if not w or not w.running:
+            return await q.answer("Аккаунт не запущен", show_alert=True)
+        twinks = [a for a in self._my_accounts(acc.get("owner_id")) if a["id"] != acc["id"]]
+        if not twinks:
+            return await q.answer("Нет других аккаунтов (твинков)", show_alert=True)
+        await q.answer(f"⏳ Сливаю по {amount} на {len(twinks)} твинк(ов)...")
+        asyncio.create_task(self._run_drain(q, acc["id"], w, twinks, amount))
+
+    async def _run_drain(self, q: CallbackQuery, aid: int, w, twinks: list[dict], amount: int) -> None:
+        results = []
+        for t in twinks:
+            ident = self._twink_ident(t)
+            if not ident:
+                results.append(f"• {t.get('name')}: ⚠️ нет username/id, пропущен")
+                continue
+            res = await w.manual_pay(ident, amount)
+            results.append(f"• {t.get('name')}: {res}")
+        acc = self.storage.get(aid)
+        text = self._account_text(acc) + "\n\n💧 <b>Слив твинкам:</b>\n" + "\n".join(results)
+        await self._safe_edit(q, text, self._account_menu(acc))
+
     async def _run_broadcast(self, q: CallbackQuery, uid: int, text: str) -> None:
         owners = {a.get("owner_id") for a in self.storage.accounts if a.get("owner_id")}
         sent, failed = 0, 0
@@ -693,6 +745,11 @@ class ControlBot:
         if field in ("card_interval", "roulette_interval"):
             if not val.isdigit() or int(val) < 10:
                 await m.reply("Нужно число секунд (>=10). Ещё раз:")
+                return
+            acc[field] = int(val)
+        elif field == "drain_amount":
+            if not val.isdigit():
+                await m.reply("Нужно число очков (0 — отключить). Ещё раз:")
                 return
             acc[field] = int(val)
         elif field == "mining_time":

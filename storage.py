@@ -141,6 +141,7 @@ ACCOUNT_DEFAULTS: dict[str, Any] = {
     "self_commands_enabled": True,
     "card_interval": 3600,
     "roulette_interval": 3600,
+    "drain_amount": 0,      # 💧 фикс. сумма очков «слива» твинкам (только с 👑 главного аккаунта), 0 = не задано
 }
 
 
