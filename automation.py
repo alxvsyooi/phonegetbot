@@ -56,7 +56,7 @@ class _WorkerBase:
         self.alert_fn = None                    # callable(owner_id, text, markup) -> coroutine (ставит Manager)
 
         self._tasks: list[asyncio.Task] = []
-        self._pending: dict[str, asyncio.Future] = {}
+        self._pending: dict[str, list[asyncio.Future]] = {}  # username -> очередь ожидающих (FIFO)
         self._trade_mode = False
         self._trade_queue: asyncio.Queue | None = None
         self._task_next: dict[int, float] = {}   # tid -> время следующего запуска
@@ -153,9 +153,10 @@ class _WorkerBase:
         for t in self._tasks:
             t.cancel()
         self._tasks = []
-        for fut in self._pending.values():
-            if not fut.done():
-                fut.cancel()
+        for futs in self._pending.values():
+            for fut in futs:
+                if not fut.done():
+                    fut.cancel()
         self._pending.clear()
         if self.client:
             try:
@@ -174,9 +175,19 @@ class _WorkerBase:
             if uname == CARDS_BOT.lower():
                 await self._trade_queue.put(message)
             return
-        fut = self._pending.pop(uname, None)
-        if fut and not fut.done():
-            fut.set_result(message)
+        # НЕСКОЛЬКО циклов (карточки/майнинг/контейнеры/.trade-.pay) могут одновременно
+        # ждать ответ от ОДНОГО и того же бота (чаще всего phonegetcardsbot). Раньше тут
+        # был один слот на username — второй ожидающий просто затирал future первого, и
+        # тот уходил в таймаут, как будто бот не ответил (внешне выглядело так, будто
+        # именно «Ткарточка» не работает, хотя дело было в конкуренции с параллельным
+        # циклом). Поэтому ожидающие — очередь FIFO: раздаём ответы по порядку регистрации.
+        queue = self._pending.get(uname)
+        if queue:
+            fut = queue.pop(0)
+            if not queue:
+                self._pending.pop(uname, None)
+            if not fut.done():
+                fut.set_result(message)
 
     async def get_account_info(self) -> dict[str, Any] | None:
         """Читает у Telegram актуальные данные аккаунта (в т.ч. номер телефона)
@@ -197,25 +208,38 @@ class _WorkerBase:
         except Exception as e:  # noqa: BLE001
             return {"error": f"{type(e).__name__}: {e}"}
 
-    async def _send_and_wait(self, username: str, text: str, timeout: int = 25):
+    def _register_wait(self, username: str) -> asyncio.Future:
         loop = asyncio.get_running_loop()
         fut = loop.create_future()
-        self._pending[username.lower()] = fut
+        self._pending.setdefault(username.lower(), []).append(fut)
+        return fut
+
+    def _forget_wait(self, username: str, fut: asyncio.Future) -> None:
+        queue = self._pending.get(username.lower())
+        if not queue:
+            return
+        try:
+            queue.remove(fut)
+        except ValueError:
+            pass
+        if not queue:
+            self._pending.pop(username.lower(), None)
+
+    async def _send_and_wait(self, username: str, text: str, timeout: int = 25):
+        fut = self._register_wait(username)
         await self.client.send_message(username, text)
         try:
             return await asyncio.wait_for(fut, timeout)
         except asyncio.TimeoutError:
-            self._pending.pop(username.lower(), None)
+            self._forget_wait(username, fut)
             return None
 
     async def _wait_next(self, username: str, timeout: int = 12):
-        loop = asyncio.get_running_loop()
-        fut = loop.create_future()
-        self._pending[username.lower()] = fut
+        fut = self._register_wait(username)
         try:
             return await asyncio.wait_for(fut, timeout)
         except asyncio.TimeoutError:
-            self._pending.pop(username.lower(), None)
+            self._forget_wait(username, fut)
             return None
 
     # ---------- примитивы режима трейда (использует farm.py / trade.py) ----------
