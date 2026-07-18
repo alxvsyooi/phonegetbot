@@ -31,15 +31,21 @@ _TIME_RE = re.compile(
     re.IGNORECASE,
 )
 _POINTS_RE = re.compile(r"точки\D*?(\d[\d\s.,]*)", re.IGNORECASE)
+_COLLECTION_RE = re.compile(r"телефонов\s+в\s+коллекции\D*?(\d[\d\s.,]*)", re.IGNORECASE)
 # "через 3 дн. 5 ч. 10 мин." (магазин контейнеров — с днями, без секунд)
 _SHOP_TIME_RE = re.compile(
     r"через\s*(?:(\d+)\s*дн[а-я.]*)?\s*(?:(\d+)\s*ч[а-я.]*)?\s*(?:(\d+)\s*мин[а-я.]*)?",
     re.IGNORECASE,
 )
+# страховка от «перекрёстного» парсинга: сообщение магазина контейнеров тоже содержит
+# «через N ч M мин» (после «N дн.») — если парсер карточек/рулетки получит его (даже
+# редкая гонка при параллельных запросах к одному боту), «дн.» в тексте выдаёт чужой
+# формат, и парсить его как обычный кулдаун карточки нельзя
+_DAY_HINT_RE = re.compile(r"\d+\s*дн", re.IGNORECASE)
 
 
 def parse_cooldown(text: str | None) -> int | None:
-    if not text:
+    if not text or _DAY_HINT_RE.search(text):
         return None
     m = _TIME_RE.search(text)
     if not m:
@@ -53,6 +59,16 @@ def parse_points(text: str | None) -> int | None:
     if not text:
         return None
     m = _POINTS_RE.search(text)
+    if not m:
+        return None
+    digits = re.sub(r"\D", "", m.group(1))
+    return int(digits) if digits else None
+
+
+def parse_collection_count(text: str | None) -> int | None:
+    if not text:
+        return None
+    m = _COLLECTION_RE.search(text)
     if not m:
         return None
     digits = re.sub(r"\D", "", m.group(1))
@@ -180,7 +196,7 @@ def _max_numeric_button(message) -> str | None:
 
 class FarmModule:
     """Миксин с игровой автоматизацией. Ожидает от связанного класса: self.account,
-    self.client, self.running, self._trade_mode, self._send_and_wait, self._wait_next,
+    self.client, self.running, self._trade_mode, self._send_and_wait, self._click_and_wait,
     self._try_click, self._bump, self.trade_runner, self.good_keywords,
     self.container_cfg, self.payout_delay и статус-поля last_*/*_next_ts
     (инициализируются в базовом классе — automation.py)."""
@@ -255,10 +271,9 @@ class FarmModule:
                 text = getattr(reply, "text", None) or getattr(reply, "caption", None)
                 default = int(self.account.get("roulette_interval", 3600))
 
-                clicked = await self._try_click(reply, ROULETTE_BUTTON)
+                clicked, result = await self._click_and_wait(reply, ROULETTE_BUTTON, ROULETTE_BOT, timeout=12)
                 if clicked:
                     self._bump("roulette")
-                    result = await self._wait_next(ROULETTE_BOT, timeout=12)
                     rtext = (getattr(result, "text", None)
                              or getattr(result, "caption", None) or text)
                     cd = parse_cooldown(rtext)
@@ -369,9 +384,11 @@ class FarmModule:
         bot = cfg.get("bot") or CARDS_BOT
         refresh_label = cfg.get("refresh_button") or "обновить"
         btn = _find_button(prev_reply, refresh_label)
-        if not btn or not await self._try_click(prev_reply, btn):
+        if not btn:
             return await self._probe_shop(cfg)
-        reply = await self._wait_next(bot, timeout=15)
+        clicked, reply = await self._click_and_wait(prev_reply, btn, bot, timeout=15)
+        if not clicked:
+            return await self._probe_shop(cfg)
         if reply is None:
             return "none", reply, None
         text = getattr(reply, "text", None) or getattr(reply, "caption", None)
@@ -573,9 +590,9 @@ class FarmModule:
             return None
         retry_interval = max(3, int(cfg.get("retry_interval", 10)))
         for i in range(3):
-            if not await self._try_click(msg, btn):
+            clicked, result = await self._click_and_wait(msg, btn, bot, timeout=timeout)
+            if not clicked:
                 return None
-            result = await self._wait_next(bot, timeout=timeout)
             if result is not None:
                 return result
             if i < 2:
@@ -599,13 +616,25 @@ class FarmModule:
         return parse_points(getattr(bal, "text", None) or getattr(bal, "caption", None))
 
     async def fetch_balance_info(self) -> str:
-        """«такс» -> сырой ответ профиля (очки, телефоны в коллекции и т.п.),
-        как прислал игровой бот — используется кнопкой «🧾 Такс» в карточке аккаунта."""
+        """«такс» -> разобранные точки/коллекция для кнопки «🧾 Такс» в карточке
+        аккаунта. Если формат ответа не узнан (ни одно поле не распозналось) —
+        отдаём сырой текст как есть, а не молчим о непонятном ответе."""
         if not self.client or not self.running:
             return "аккаунт не запущен"
         reply = await self._send_and_wait(CARDS_BOT, BALANCE_WORD, timeout=15)
         text = (getattr(reply, "text", None) or getattr(reply, "caption", None)) if reply else None
-        return text or "⚠️ нет ответа"
+        if not text:
+            return "⚠️ нет ответа"
+        points = parse_points(text)
+        collection = parse_collection_count(text)
+        if points is None and collection is None:
+            return text
+        lines = []
+        if points is not None:
+            lines.append(f"💰 Точки: {points:,}".replace(",", " "))
+        if collection is not None:
+            lines.append(f"📱 Телефонов в коллекции: {collection}")
+        return "\n".join(lines)
 
     async def _buy_category(
         self, bot: str, shop_msg, category_label: str, cfg: dict, balance: int | None,

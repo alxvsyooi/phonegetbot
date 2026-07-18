@@ -57,6 +57,7 @@ class _WorkerBase:
 
         self._tasks: list[asyncio.Task] = []
         self._pending: dict[str, list[asyncio.Future]] = {}  # username -> очередь ожидающих (FIFO)
+        self._bot_locks: dict[str, asyncio.Lock] = {}        # username -> лок на «отправил/кликнул + жду ответ»
         self._trade_mode = False
         self._trade_queue: asyncio.Queue | None = None
         self._task_next: dict[int, float] = {}   # tid -> время следующего запуска
@@ -225,22 +226,47 @@ class _WorkerBase:
         if not queue:
             self._pending.pop(username.lower(), None)
 
-    async def _send_and_wait(self, username: str, text: str, timeout: int = 25):
-        fut = self._register_wait(username)
-        await self.client.send_message(username, text)
-        try:
-            return await asyncio.wait_for(fut, timeout)
-        except asyncio.TimeoutError:
-            self._forget_wait(username, fut)
-            return None
+    def _lock_for_bot(self, username: str) -> asyncio.Lock:
+        key = username.lower()
+        lock = self._bot_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._bot_locks[key] = lock
+        return lock
 
-    async def _wait_next(self, username: str, timeout: int = 12):
-        fut = self._register_wait(username)
-        try:
-            return await asyncio.wait_for(fut, timeout)
-        except asyncio.TimeoutError:
-            self._forget_wait(username, fut)
-            return None
+    async def _send_and_wait(self, username: str, text: str, timeout: int = 25):
+        # Лок на бота держим ВЕСЬ круг «отправил -> получил ответ»: несколько циклов
+        # (карточки/майнинг/контейнеры/такс/ручной перевод) ходят в ОДНОГО бота
+        # (phonegetcardsbot) — без лока параллельная отправка могла зарегистрировать
+        # своё ожидание раньше нашего и перехватить наш же ответ (внешне выглядело
+        # как «Ткарточка не работает» или как будто карточка распарсила ответ магазина).
+        async with self._lock_for_bot(username):
+            fut = self._register_wait(username)
+            await self.client.send_message(username, text)
+            try:
+                return await asyncio.wait_for(fut, timeout)
+            except asyncio.TimeoutError:
+                self._forget_wait(username, fut)
+                return None
+
+    async def _click_and_wait(
+        self, message, button_text: str, bot: str, timeout: int = 12,
+    ) -> tuple[bool, Any]:
+        """Клик по кнопке + ожидание следующего сообщения ОТ ЭТОГО БОТА — атомарно
+        под локом бота на всём участке (клик и регистрация ожидания без зазора между
+        ними), чтобы параллельный запрос к тому же боту не перехватил ответ на наш
+        клик. Возвращает (clicked, result); result is None — клик прошёл, но бот не
+        ответил за timeout."""
+        async with self._lock_for_bot(bot):
+            clicked = await self._try_click(message, button_text)
+            if not clicked:
+                return False, None
+            fut = self._register_wait(bot)
+            try:
+                return True, await asyncio.wait_for(fut, timeout)
+            except asyncio.TimeoutError:
+                self._forget_wait(bot, fut)
+                return True, None
 
     # ---------- примитивы режима трейда (использует farm.py / trade.py) ----------
     def enter_trade_mode(self) -> None:

@@ -274,9 +274,10 @@ class ControlBot:
 
     # ============ текст карточки ============
     def _account_text(self, acc: dict) -> str:
-        """Свёрнутая карточка: только «через сколько что» по включённым фичам —
-        выключенные показывают 🔴 выкл вместо устаревшего last_* текста (не путать
-        «выключено» с «готово»). Подробности отдельной фичи — кнопки в ▶️ Действия."""
+        """Свёрнутая карточка: только «через сколько что» по фичам, которые СЕЙЧАС
+        включены — выключенная фича просто не показывается (не путать с прошлым
+        вариантом, где стояло «выкл»: тут бот реально отслеживает тумблеры, а не
+        показывает устаревший last_* текст). Подробности — кнопки в ▶️ Действия."""
         w = self.manager.workers.get(acc["id"])
         crown = "👑 " if acc.get("is_main") else ""
         name = f"{crown}<b>{acc.get('name')}</b>"
@@ -288,17 +289,18 @@ class ControlBot:
 
         farm_on = acc.get("farm_enabled", True)
 
-        def feat(emoji: str, label: str, field: str, remaining_fn, default: bool = True) -> str:
+        def feat(emoji: str, label: str, field: str, remaining_fn, default: bool = True) -> str | None:
             if not farm_on or not acc.get(field, default):
-                return f"{emoji} {label}: 🔴 выкл"
+                return None
             return f"{emoji} {label}: через <b>{remaining_fn()}</b>"
 
-        lines = [f"🟢 {name}", ""]
-        lines.append(feat("🃏", "Карточка", "card_enabled", w.card_remaining))
-        lines.append(feat("🎰", "Рулетка", "roulette_enabled", w.roulette_remaining))
-        lines.append(feat("⛏", "Майнинг", "mining_enabled", w.mining_remaining))
-        lines.append(feat("🎁", "Награда", "daily_reward_enabled", w.mining_remaining))
-        lines.append(feat("📦", "Конты", "containers_enabled", w.container_remaining, default=False))
+        rows = [
+            feat("🃏", "Карточка", "card_enabled", w.card_remaining),
+            feat("🎰", "Рулетка", "roulette_enabled", w.roulette_remaining),
+            feat("⛏", "Майнинг", "mining_enabled", w.mining_remaining),
+            feat("📦", "Конты", "containers_enabled", w.container_remaining, default=False),
+        ]
+        lines = [f"🟢 {name}", ""] + [r for r in rows if r]
         return "\n".join(lines)
 
     # ============ callback ============
