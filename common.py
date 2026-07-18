@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from storage import MINING_HOUR, MINING_MINUTE
 
 MSK = timezone(timedelta(hours=3))
+TBILISI = timezone(timedelta(hours=4))
 
 
 def parse_hhmm(value: str | None) -> tuple[int, int]:
@@ -51,3 +52,17 @@ def clock() -> str:
 
 def today_msk() -> str:
     return datetime.now(MSK).strftime("%d.%m")
+
+
+def in_time_window(tz: timezone, start: str, end: str) -> bool:
+    """True, если сейчас (в tz) время попадает в окно [start, end) ЧЧ:ММ. Понимает
+    окна через полночь (start > end), напр. «22:00»..«07:00» — тихие часы автопринятия."""
+    sh, sm = parse_hhmm(start)
+    eh, em = parse_hhmm(end)
+    start_min, end_min = sh * 60 + sm, eh * 60 + em
+    if start_min == end_min:
+        return False
+    now_min = datetime.now(tz).hour * 60 + datetime.now(tz).minute
+    if start_min < end_min:
+        return start_min <= now_min < end_min
+    return now_min >= start_min or now_min < end_min

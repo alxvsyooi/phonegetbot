@@ -129,6 +129,7 @@ class ControlBot:
         return InlineKeyboardMarkup([
             [_btn("⏸ Выключить" if en else "▶️ Включить", f"toggle:{aid}")],
             [_btn("🌾 Фарм карточек", f"farm:{aid}"), _btn("📨 Автоотправка", f"autosend:{aid}")],
+            [_btn("🛠 Мастерская и магазин", f"workshop:{aid}")],
             [_btn("🧾 Такс", f"taxx:{aid}"), _btn(f"🔔 Алерты: {al}", f"talerts:{aid}")],
             [_btn("✏️ Имя", f"rename:{aid}"), _btn("🗑 Удалить", f"del:{aid}")],
             [_btn("🔄 Обновить", f"acc:{aid}"), _btn("⬅️ Назад", "list")],
@@ -229,6 +230,34 @@ class ControlBot:
             rows.append([_btn("💧 Слить твинкам сейчас", f"draindo:{aid}")])
         rows.append([_btn("⬅️ Назад", f"farm:{aid}")])
         return InlineKeyboardMarkup(rows)
+
+    # ---------- 🛠 Мастерская и магазин (независимый модуль) ----------
+    def _workshop_menu(self, acc: dict) -> InlineKeyboardMarkup:
+        aid = acc["id"]
+        def s(f):
+            return "вкл ✅" if acc.get(f, False) else "выкл ❌"
+        qty = acc.get("phone_shop_quantity", 0) or "макс"
+        return InlineKeyboardMarkup([
+            [_btn(f"🛠 Автопочинка своих телефонов: {s('auto_repair_enabled')}", f"trepair:{aid}")],
+            [_btn(f"📥 Автопринятие чужих заказов: {s('auto_accept_enabled')}", f"taccept:{aid}")],
+            [_btn(f"🏪 Автозакупка телефонов: {s('phone_shop_enabled')}", f"tshop:{aid}")],
+            [_btn(f"🏪 Редкость закупки: {acc.get('phone_shop_rarity', 'Ширпотреб')}", f"setrarity:{aid}")],
+            [_btn(f"🏪 Кол-во за раз: {qty}", f"setqty:{aid}")],
+            [_btn("🛠 Почистить нерабочие сейчас", f"repairnow:{aid}")],
+            [_btn("🏪 Купить телефоны сейчас", f"shopnow:{aid}")],
+            [_btn("⬅️ Назад", f"acc:{aid}")],
+        ])
+
+    def _workshop_text(self, acc: dict) -> str:
+        w = self.manager.workers.get(acc["id"])
+        lines = [f"🛠 <b>Мастерская и магазин</b> — {acc.get('name')}"]
+        if w:
+            lines += [
+                f"🛠 Автопочинка: {w.last_repair}",
+                f"📥 Автопринятие: {w.last_accept}",
+                f"🏪 Автозакупка: {w.last_shop}",
+            ]
+        return "\n".join(lines)
 
     @staticmethod
     def _task_sched(t: dict) -> str:
@@ -362,6 +391,8 @@ class ControlBot:
                 await q.message.edit_text(self._farm_text(acc), reply_markup=self._farm_menu(acc))
             elif data.startswith("autosend:"):
                 await q.message.edit_text(self._autosend_text(acc), reply_markup=self._autosend_menu(acc))
+            elif data.startswith("workshop:"):
+                await q.message.edit_text(self._workshop_text(acc), reply_markup=self._workshop_menu(acc))
             elif data.startswith("autom:"):
                 await q.message.edit_text(f"⚙️ Автоматизация — <b>{acc.get('name')}</b>",
                                           reply_markup=self._automation_menu(acc))
@@ -470,6 +501,24 @@ class ControlBot:
                     "Пришли число, либо 0 чтобы отключить:")
             elif data.startswith("draindo:"):
                 await self._start_drain(q, acc)
+            elif data.startswith("trepair:"):
+                await self._toggle(q, acc, "auto_repair_enabled", redisplay="workshop")
+            elif data.startswith("taccept:"):
+                await self._toggle(q, acc, "auto_accept_enabled", redisplay="workshop")
+            elif data.startswith("tshop:"):
+                await self._toggle(q, acc, "phone_shop_enabled", redisplay="workshop")
+            elif data.startswith("setrarity:"):
+                self._ask(uid, aid, "phone_shop_rarity")
+                await q.message.edit_text(
+                    "Редкость для автозакупки — как называется кнопка в магазине "
+                    "(напр. Ширпотреб, Необычный, Редкий, Мистический, Хроматический, Аркана, Платиновый):")
+            elif data.startswith("setqty:"):
+                self._ask(uid, aid, "phone_shop_quantity")
+                await q.message.edit_text("Сколько покупать за раз (число), либо 0 — максимум доступного:")
+            elif data.startswith("repairnow:"):
+                await self._start_repair_now(q, aid)
+            elif data.startswith("shopnow:"):
+                await self._start_shop_now(q, aid)
             elif data.startswith("capgo:"):
                 cat = data.split(":")[2]
                 w = self.manager.workers.get(aid)
@@ -543,7 +592,10 @@ class ControlBot:
         self.states[uid] = {"flow": "set", "field": field, "acc_id": aid}
 
     async def _toggle(self, q: CallbackQuery, acc: dict, field: str, redisplay: str = "automation") -> None:
-        default = False if field in ("autotrade_enabled", "containers_enabled") else True
+        default = False if field in (
+            "autotrade_enabled", "containers_enabled",
+            "auto_repair_enabled", "auto_accept_enabled", "phone_shop_enabled",
+        ) else True
         acc[field] = not acc.get(field, default)
         self.storage.save()
         if field == "enabled":
@@ -557,6 +609,8 @@ class ControlBot:
             await q.message.edit_text(self._farm_text(acc), reply_markup=self._farm_menu(acc))
         elif redisplay == "autosend":
             await q.message.edit_text(self._autosend_text(acc), reply_markup=self._autosend_menu(acc))
+        elif redisplay == "workshop":
+            await q.message.edit_text(self._workshop_text(acc), reply_markup=self._workshop_menu(acc))
         else:  # "automation" — фарм-подтумблеры (карточки/рулетка/майнинг/…)
             await q.message.edit_text(f"⚙️ Автоматизация — <b>{acc.get('name')}</b>",
                                       reply_markup=self._automation_menu(acc))
@@ -685,6 +739,30 @@ class ControlBot:
         text = self._account_text(acc) + "\n\n💧 <b>Слив твинкам:</b>\n" + "\n".join(results)
         await self._safe_edit(q, text, self._account_menu(acc))
 
+    async def _start_repair_now(self, q: CallbackQuery, aid: int) -> None:
+        w = self.manager.workers.get(aid)
+        if not w or not w.running:
+            return await q.answer("Аккаунт не запущен", show_alert=True)
+        await q.answer("⏳ Проверяю нерабочие телефоны...")
+        asyncio.create_task(self._run_repair_now(q, aid, w))
+
+    async def _run_repair_now(self, q: CallbackQuery, aid: int, w) -> None:
+        result = await w.repair_now()
+        acc = self.storage.get(aid)
+        await self._safe_edit(q, self._workshop_text(acc) + f"\n\n🛠 {result}", self._workshop_menu(acc))
+
+    async def _start_shop_now(self, q: CallbackQuery, aid: int) -> None:
+        w = self.manager.workers.get(aid)
+        if not w or not w.running:
+            return await q.answer("Аккаунт не запущен", show_alert=True)
+        await q.answer("⏳ Покупаю телефоны...")
+        asyncio.create_task(self._run_shop_now(q, aid, w))
+
+    async def _run_shop_now(self, q: CallbackQuery, aid: int, w) -> None:
+        result = await w.buy_phones_now()
+        acc = self.storage.get(aid)
+        await self._safe_edit(q, self._workshop_text(acc) + f"\n\n🏪 {result}", self._workshop_menu(acc))
+
     async def _run_broadcast(self, q: CallbackQuery, uid: int, text: str) -> None:
         owners = {a.get("owner_id") for a in self.storage.accounts if a.get("owner_id")}
         sent, failed = 0, 0
@@ -754,6 +832,24 @@ class ControlBot:
                 await m.reply("Нужно число очков (0 — отключить). Ещё раз:")
                 return
             acc[field] = int(val)
+        elif field == "phone_shop_rarity":
+            if not val:
+                await m.reply("Не пусто. Ещё раз:")
+                return
+            acc[field] = val
+            self.storage.save()
+            self.states.pop(uid, None)
+            await m.reply(self._workshop_text(acc), reply_markup=self._workshop_menu(acc))
+            return
+        elif field == "phone_shop_quantity":
+            if not val.isdigit():
+                await m.reply("Нужно число (0 — максимум доступного). Ещё раз:")
+                return
+            acc[field] = int(val)
+            self.storage.save()
+            self.states.pop(uid, None)
+            await m.reply(self._workshop_text(acc), reply_markup=self._workshop_menu(acc))
+            return
         elif field == "mining_time":
             mt = re.match(r"^\s*(\d{1,2})[:.\s](\d{1,2})\s*$", val)
             if not mt or not (0 <= int(mt.group(1)) < 24 and 0 <= int(mt.group(2)) < 60):

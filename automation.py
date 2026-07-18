@@ -24,6 +24,8 @@ from storage import CARDS_BOT
 from common import MSK, parse_hhmm, seconds_until_msk, fmt_duration, clock
 from farm import FarmModule
 from autosend import AutosendModule
+from shop import ShopModule
+from repair import RepairModule
 
 # main.py использует эти имена как `from automation import MSK, _parse_hhmm`
 _parse_hhmm = parse_hhmm
@@ -42,6 +44,8 @@ class _WorkerBase:
         payout_delay: int = 120,
         container_cfg: dict | None = None,
         self_commands_cfg: dict | None = None,
+        shop_cfg: dict | None = None,
+        repair_cfg: dict | None = None,
     ) -> None:
         self.account = account                 # ссылка на словарь из Storage (читаем «вживую»)
         self.storage = storage
@@ -49,6 +53,8 @@ class _WorkerBase:
         self.payout_delay = payout_delay
         self.container_cfg = container_cfg or {}
         self.self_commands_cfg = self_commands_cfg or {}
+        self.shop_cfg = shop_cfg or {}
+        self.repair_cfg = repair_cfg or {}
 
         self.client: Client | None = None
         self.running = False
@@ -68,6 +74,8 @@ class _WorkerBase:
         self.roulette_next_ts = now
         self.mining_next_ts = now
         self.container_next_ts = now
+        self.shop_next_ts = now
+        self.repair_next_ts = now
         self.status = "остановлен"
         self.last_card = "—"
         self.last_roulette = "—"
@@ -77,6 +85,9 @@ class _WorkerBase:
         self.last_container = "—"
         self.last_daily = "—"
         self.last_self_cmd = "—"
+        self.last_shop = "—"
+        self.last_repair = "—"
+        self.last_accept = "—"
 
     # ---------- свойства ----------
     @property
@@ -168,6 +179,17 @@ class _WorkerBase:
         self.status = "остановлен"
         print(f"[{self.name}] остановлен")
 
+    # ---------- проактивные сообщения бота (не ответ на наш send/click) ----------
+    def _is_proactive(self, message) -> bool:
+        """Хук: True, если это сообщение бот прислал САМ, не в ответ на что-то наше
+        (например, входящий запрос на ремонт от клиента) — такие НЕ должны попадать
+        в FIFO-очередь _pending, иначе могут перехватить ответ, который реально кто-то
+        ждёт. Переопределяется миксинами (см. RepairModule)."""
+        return False
+
+    async def _handle_proactive(self, message) -> None:
+        pass
+
     # ---------- приём сообщений ----------
     async def _on_message(self, _client, message) -> None:
         uname = (getattr(message.chat, "username", "") or "").lower()
@@ -175,6 +197,9 @@ class _WorkerBase:
             # во время трейда копим только сообщения игрового бота карточек
             if uname == CARDS_BOT.lower():
                 await self._trade_queue.put(message)
+            return
+        if self._is_proactive(message):
+            await self._handle_proactive(message)
             return
         # НЕСКОЛЬКО циклов (карточки/майнинг/контейнеры/.trade-.pay) могут одновременно
         # ждать ответ от ОДНОГО и того же бота (чаще всего phonegetcardsbot). Раньше тут
@@ -328,8 +353,10 @@ class _WorkerBase:
         return fmt_duration(int(rem)) if rem > 0 else ready
 
 
-class AccountWorker(FarmModule, AutosendModule, _WorkerBase):
+class AccountWorker(FarmModule, AutosendModule, ShopModule, RepairModule, _WorkerBase):
     """Полный воркер аккаунта = 🌾 Фарм карточек (farm.py) + 📨 Автоотправка
-    (autosend.py) + базовое подключение (этот файл). Модули независимы: каждый
-    включается/выключается своим тумблером (farm_enabled / autosend_enabled)."""
+    (autosend.py) + 🏪 Магазин телефонов (shop.py) + 🛠 Мастерская (repair.py) +
+    базовое подключение (этот файл). Модули независимы: каждый включается/
+    выключается своим тумблером (farm_enabled / autosend_enabled / phone_shop_enabled /
+    auto_repair_enabled / auto_accept_enabled)."""
     pass

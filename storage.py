@@ -114,6 +114,31 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         # навигационные подписи (НЕ телефон/редкость)
         "skip_buttons": ["назад", "вернуться", "быстрый выбор", "закрыть", "отмена", "меню"],
     },
+    "phone_shop": {
+        "bot": "phonegetcardsbot",
+        "open_command": "Магазин телефонов",
+        "bulk_button": "купить оптом",
+        "confirm_button": "подтвердить",
+        "next_page_button": "➡",
+        "check_interval": 3600,   # как часто автозакупка проверяет магазин заново, сек
+    },
+    "repair": {
+        "bot": "phonegetcardsbot",
+        "my_phones_command": "Мои телефоны",
+        "workshop_command": "Моя мастерская",
+        "broken_button": "нерабочие телефоны",
+        "equipment_button": "оборудование",
+        "own_workshop_button": "в своей мастерской",
+        "repair_button": "отдать в ремонт",
+        "start_repair_button": "начать ремонт",
+        "next_page_button": "➡",
+        "capacity_marker": "занято ремонтом",
+        "check_interval": 300,      # как часто автопочинка проверяет нерабочие телефоны, сек
+        "request_marker": "запрос на ремонт телефона",  # входящий запрос от клиента (автопринятие)
+        "accept_button": "принять заказ",
+        "quiet_start": "22:00",     # тбилисское время — с этого часа автопринятие НЕ подтверждает заказы
+        "quiet_end": "07:00",       # (чтобы не конкурировать за оборудование с автопочинкой ночью)
+    },
 }
 
 # поля по умолчанию для нового аккаунта
@@ -142,12 +167,19 @@ ACCOUNT_DEFAULTS: dict[str, Any] = {
     "card_interval": 3600,
     "roulette_interval": 3600,
     "drain_amount": 0,      # 💧 фикс. сумма очков «слива» твинкам (только с 👑 главного аккаунта), 0 = не задано
+    "phone_shop_enabled": False,   # 🏪 автозакупка телефонов
+    "phone_shop_rarity": "Ширпотреб",
+    "phone_shop_model": "",        # пусто = первая модель в списке (как «по умолчанию» на скринах)
+    "phone_shop_quantity": 0,      # 0 = максимум предложенного (в рамках баланса), иначе конкретное число
+    "auto_repair_enabled": False,  # 🛠 автопочинка своих нерабочих телефонов (только своим оборудованием)
+    "auto_accept_enabled": False,  # 📥 автопринятие чужих заказов на ремонт (тихие часы — settings.repair)
 }
 
 
 def _empty_stats() -> dict[str, int]:
     return {"phones": 0, "good_phones": 0, "roulette": 0, "mining": 0, "paid": 0,
-            "exchanged": 0, "daily": 0, "containers_bought": 0}
+            "exchanged": 0, "daily": 0, "containers_bought": 0, "shop_bought": 0,
+            "repaired": 0, "accepted_orders": 0}
 
 
 def _read_json(path: str, default):

@@ -122,6 +122,8 @@ async def main() -> None:
         trade_cfg=settings.get("trade", {}),
         container_cfg=settings.get("containers", {}),
         self_commands_cfg=settings.get("self_commands", {}),
+        shop_cfg=settings.get("phone_shop", {}),
+        repair_cfg=settings.get("repair", {}),
     )
     control = ControlBot(settings, storage, manager)
     manager.bot_app = control.app  # чтобы фарм-воркеры могли слать интерактивные алерты (капча и т.п.)
