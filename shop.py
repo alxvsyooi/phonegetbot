@@ -7,6 +7,13 @@
 в списке (как показано на скринах), с настройкой ищет её по страницам. Покупает
 через «Купить оптом»: по умолчанию максимум предложенного количества, либо
 конкретное число (phone_shop_quantity), но не больше, чем позволяет баланс.
+
+Баланс («такк») проверяется ОДИН РАЗ в самом начале, ДО входа в магазин — если
+слать текстовую команду ПОСРЕДИ навигации по инлайн-кнопкам магазина, игровой бот,
+похоже, сбрасывает своё серверное состояние диалога, и кнопки на уже показанном
+сообщении после этого перестают отвечать (флоу «зависает» точно на этом шаге).
+Поэтому весь поход по магазину — только клики по кнопкам, без единого текстового
+сообщения внутри, кроме самой команды открытия.
 """
 from __future__ import annotations
 
@@ -29,7 +36,7 @@ def _all_buttons(message) -> list[str]:
 
 
 def _find_button(message, substr: str) -> str | None:
-    sub = substr.lower()
+    sub = substr.lower().strip()
     for t in _all_buttons(message):
         if sub in t.lower():
             return t
@@ -91,6 +98,24 @@ class ShopModule:
                 self.shop_next_ts = time.time() + 300
                 await asyncio.sleep(5)
 
+    # ---------- клик с повтором, если бот просто не спешит с ответом ----------
+    async def _click_retry(self, message, button_text: str, bot: str, cfg: dict, timeout: int = 15):
+        """Как _click_and_wait, но повторяет клик (не долбит наугад — тот же клик по
+        той же кнопке), если бот принял клик, но не ответил за timeout. Возвращает
+        (clicked, result); result is None, если так и не дождались ответа."""
+        retry_delay = max(2, int(cfg.get("retry_interval", 5)))
+        attempts = max(1, int(cfg.get("retry_attempts", 3)))
+        clicked = False
+        for i in range(attempts):
+            clicked, result = await self._click_and_wait(message, button_text, bot, timeout=timeout)
+            if not clicked:
+                return False, None
+            if result is not None:
+                return True, result
+            if i < attempts - 1:
+                await asyncio.sleep(retry_delay)
+        return clicked, None
+
     async def buy_phones_now(self) -> str:
         """Открыть магазин телефонов, выбрать настроенную редкость/модель и купить.
         Используется циклом и кнопкой «🏪 Купить телефоны сейчас»."""
@@ -108,6 +133,10 @@ class ShopModule:
         want_qty = int(self.account.get("phone_shop_quantity", 0) or 0)
 
         try:
+            # баланс — ДО входа в магазин, одним текстовым сообщением, никак не
+            # перемешиваясь с последующей навигацией по инлайн-кнопкам (см. докстринг)
+            balance = await self._check_balance()
+
             entry = await self._send_and_wait(bot, open_cmd, timeout=20)
             if entry is None:
                 self.last_shop = f"⚠️ нет ответа на «{open_cmd}» ({clock()})"
@@ -117,7 +146,7 @@ class ShopModule:
             if not rarity_btn:
                 self.last_shop = f"⚠️ редкость «{rarity}» не найдена в магазине ({clock()})"
                 return self.last_shop
-            clicked, listing = await self._click_and_wait(entry, rarity_btn, bot, timeout=15)
+            clicked, listing = await self._click_retry(entry, rarity_btn, bot, cfg)
             if not clicked or listing is None:
                 self.last_shop = f"⚠️ нет ответа при выборе редкости ({clock()})"
                 return self.last_shop
@@ -126,13 +155,13 @@ class ShopModule:
             if not model_btn:
                 self.last_shop = f"⚠️ не нашёл модель в «{rarity}» ({clock()})"
                 return self.last_shop
-            clicked, detail = await self._click_and_wait(listing, model_btn, bot, timeout=15)
+            clicked, detail = await self._click_retry(listing, model_btn, bot, cfg)
             if not clicked or detail is None:
                 self.last_shop = f"⚠️ нет ответа на выбор модели ({clock()})"
                 return self.last_shop
 
             model_name = model_btn.rsplit("(", 1)[0].strip()
-            self.last_shop = await self._buy_selected(bot, detail, cfg, model_name, want_qty)
+            self.last_shop = await self._buy_selected(bot, detail, cfg, model_name, want_qty, balance)
             return self.last_shop
         except asyncio.CancelledError:
             raise
@@ -157,25 +186,28 @@ class ShopModule:
             nxt = _find_button(listing, next_btn_label)
             if not nxt:
                 break
-            clicked, nxt_listing = await self._click_and_wait(listing, nxt, bot, timeout=15)
+            clicked, nxt_listing = await self._click_retry(listing, nxt, bot, cfg)
             if not clicked or nxt_listing is None:
                 break
             listing = nxt_listing
         return None, listing
 
-    async def _buy_selected(self, bot: str, detail, cfg: dict, model_name: str, want_qty: int) -> str:
+    async def _buy_selected(
+        self, bot: str, detail, cfg: dict, model_name: str, want_qty: int, balance: int | None,
+    ) -> str:
         buy_btn = cfg.get("bulk_button", "купить оптом")
         confirm_btn = cfg.get("confirm_button", "подтвердить")
 
         dtext = getattr(detail, "text", None) or getattr(detail, "caption", None) or ""
         price_m = _PRICE_RE.search(dtext)
-        unit_price = int(re.sub(r"\D", "", price_m.group(1))) if price_m else None
-        balance = await self._check_balance()
+        digits = re.sub(r"\D", "", price_m.group(1)) if price_m else ""
+        unit_price = int(digits) if digits else None
 
         btn = _find_button(detail, buy_btn)
         if not btn:
-            return f"⚠️ «{model_name}»: кнопка «{buy_btn}» не найдена ({clock()})"
-        clicked, qty_msg = await self._click_and_wait(detail, btn, bot, timeout=15)
+            have = ", ".join(_all_buttons(detail)) or "нет кнопок"
+            return f"⚠️ «{model_name}»: кнопка «{buy_btn}» не найдена (есть: {have}) ({clock()})"
+        clicked, qty_msg = await self._click_retry(detail, btn, bot, cfg)
         if not clicked or qty_msg is None:
             return f"⚠️ «{model_name}»: нет ответа на «{buy_btn}» ({clock()})"
 
@@ -188,16 +220,19 @@ class ShopModule:
 
         qty_btn = _numeric_button(qty_msg, target) or _max_numeric_button(qty_msg)
         if not qty_btn:
-            return f"⚠️ «{model_name}»: не нашёл кнопку количества ({clock()})"
-        clicked, confirm_msg = await self._click_and_wait(qty_msg, qty_btn, bot, timeout=15)
+            have = ", ".join(_all_buttons(qty_msg)) or "нет кнопок"
+            return f"⚠️ «{model_name}»: не нашёл кнопку количества (есть: {have}) ({clock()})"
+        clicked, confirm_msg = await self._click_retry(qty_msg, qty_btn, bot, cfg)
         if not clicked or confirm_msg is None:
             return f"⚠️ «{model_name}»: нет ответа на выбор количества ({clock()})"
 
         done = confirm_msg
         if _find_button(confirm_msg, confirm_btn):
-            clicked, done = await self._click_and_wait(confirm_msg, confirm_btn, bot, timeout=15)
+            clicked, done = await self._click_retry(confirm_msg, confirm_btn, bot, cfg)
             if not clicked:
                 return f"⚠️ «{model_name}»: не подтвердилась покупка ({clock()})"
+            if done is None:
+                done = confirm_msg
 
         text = (getattr(done, "text", None) or getattr(done, "caption", None) or "") if done else ""
         m = _BUY_CONFIRM_RE.search(text)

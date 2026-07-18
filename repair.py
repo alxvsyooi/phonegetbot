@@ -67,6 +67,21 @@ class RepairModule:
     def _loops(self):
         return super()._loops() + [self._auto_repair_loop()]
 
+    # ---------- клик с повтором, если бот просто не спешит с ответом ----------
+    async def _click_retry(self, message, button_text: str, bot: str, cfg: dict, timeout: int = 15):
+        retry_delay = max(2, int(cfg.get("retry_interval", 5)))
+        attempts = max(1, int(cfg.get("retry_attempts", 3)))
+        clicked = False
+        for i in range(attempts):
+            clicked, result = await self._click_and_wait(message, button_text, bot, timeout=timeout)
+            if not clicked:
+                return False, None
+            if result is not None:
+                return True, result
+            if i < attempts - 1:
+                await asyncio.sleep(retry_delay)
+        return clicked, None
+
     # ---------- проактивные сообщения (входящие заказы на ремонт) ----------
     def _is_proactive(self, message) -> bool:
         marker = (self.repair_cfg.get("request_marker") or "запрос на ремонт телефона").lower()
@@ -107,7 +122,7 @@ class RepairModule:
         eq_btn = _find_button(panel, cfg.get("equipment_button", "оборудование"))
         if not eq_btn:
             return None
-        clicked, eq = await self._click_and_wait(panel, eq_btn, bot, timeout=15)
+        clicked, eq = await self._click_retry(panel, eq_btn, bot, cfg)
         if not clicked or eq is None:
             return None
         m = _CAPACITY_RE.search(_msg_text(eq))
@@ -165,7 +180,7 @@ class RepairModule:
             if not broken_btn:
                 self.last_repair = f"⚠️ кнопка нерабочих телефонов не найдена ({clock()})"
                 return self.last_repair
-            clicked, cats = await self._click_and_wait(entry, broken_btn, bot, timeout=15)
+            clicked, cats = await self._click_retry(entry, broken_btn, bot, cfg)
             if not clicked or cats is None:
                 self.last_repair = f"⚠️ нет ответа на список категорий ({clock()})"
                 return self.last_repair
@@ -174,7 +189,7 @@ class RepairModule:
             if not cat_btn:
                 self.last_repair = f"✅ нерабочих телефонов нет ({clock()} {today_msk()})"
                 return self.last_repair
-            clicked, phone_card = await self._click_and_wait(cats, cat_btn, bot, timeout=15)
+            clicked, phone_card = await self._click_retry(cats, cat_btn, bot, cfg)
             if not clicked or phone_card is None:
                 self.last_repair = f"⚠️ нет ответа при открытии категории ({clock()})"
                 return self.last_repair
@@ -197,7 +212,7 @@ class RepairModule:
         repair_btn = _find_button(phone_card, cfg.get("repair_button", "отдать в ремонт"))
         if not repair_btn:
             return f"⚠️ «{model_name}»: кнопка «в ремонт» не найдена ({clock()})"
-        clicked, breakages = await self._click_and_wait(phone_card, repair_btn, bot, timeout=15)
+        clicked, breakages = await self._click_retry(phone_card, repair_btn, bot, cfg)
         if not clicked or breakages is None:
             return f"⚠️ «{model_name}»: нет ответа на выбор поломки ({clock()})"
 
@@ -206,7 +221,7 @@ class RepairModule:
             (t for t in _all_buttons(breakages) if not any(s in t.lower() for s in skip)), None)
         if not breakage_btn:
             return f"⚠️ «{model_name}»: не нашёл кнопку поломки ({clock()})"
-        clicked, workshop_pick = await self._click_and_wait(breakages, breakage_btn, bot, timeout=15)
+        clicked, workshop_pick = await self._click_retry(breakages, breakage_btn, bot, cfg)
         if not clicked or workshop_pick is None:
             return f"⚠️ «{model_name}»/«{breakage_btn}»: нет ответа ({clock()})"
 
@@ -214,14 +229,14 @@ class RepairModule:
         if not own_btn:
             return (f"⚠️ «{model_name}»/«{breakage_btn}»: своего оборудования нет — "
                     f"чужую мастерскую не арендуем ({clock()})")
-        clicked, tools = await self._click_and_wait(workshop_pick, own_btn, bot, timeout=15)
+        clicked, tools = await self._click_retry(workshop_pick, own_btn, bot, cfg)
         if not clicked or tools is None:
             return f"⚠️ «{model_name}»/«{breakage_btn}»: нет ответа своей мастерской ({clock()})"
 
         start_btn = _find_button(tools, cfg.get("start_repair_button", "начать ремонт"))
         if not start_btn:
             return f"⚠️ «{model_name}»/«{breakage_btn}»: нет свободного своего инструмента ({clock()})"
-        clicked, _started = await self._click_and_wait(tools, start_btn, bot, timeout=15)
+        clicked, _started = await self._click_retry(tools, start_btn, bot, cfg)
         if not clicked:
             return f"⚠️ «{model_name}»/«{breakage_btn}»: клик не прошёл ({clock()})"
 
