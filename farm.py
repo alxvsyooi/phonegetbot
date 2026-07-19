@@ -154,6 +154,11 @@ def _find_button(message, substr: str) -> str | None:
 
 _CATEGORY_KEYWORDS = {"donation": "донат", "expensive": "дорог", "budget": "бюджет"}
 _CATEGORY_EMOJI = {"donation": "🎁", "expensive": "💎", "budget": "💰"}
+_CATEGORY_QTY_FIELD = {
+    "donation": "containers_qty_donation",
+    "expensive": "containers_qty_expensive",
+    "budget": "containers_qty_budget",
+}
 # ожидаемые границы цены за 1 шт. по факту наблюдений — используются только как
 # страховка от бага парсинга (см. _buy_category), не как жёсткий лимит покупки
 _DEFAULT_PRICE_RANGE = {
@@ -665,6 +670,11 @@ class FarmModule:
                 return False, f"{category_label}: не хватает баланса (цена {unit_price}, баланс {balance})", 0
             remaining = min(remaining, affordable)
 
+        qty_field = _CATEGORY_QTY_FIELD.get(key)
+        configured_qty = int(self.account.get(qty_field, 0) or 0) if qty_field else 0
+        if configured_qty > 0:
+            remaining = min(remaining, configured_qty)
+
         single_btn = cfg.get("single_button", "купить 1")
         bulk_btn = cfg.get("bulk_button", "купить оптом")
         confirm_btn = cfg.get("confirm_button", "подтвердить")
@@ -695,10 +705,11 @@ class FarmModule:
         return True, f"{remaining} шт. ({category_label}, ~{total_price:,} ТОчек)".replace(",", " "), total_price
 
     async def _buy_containers(self, bot: str, shop_msg, cfg: dict) -> str:
-        """Проходит preferred_categories по порядку, покупая максимум доступного
-        (в пределах баланса) в каждой разрешённой (тумблерами containers_buy_*)
-        категории. Баланс проверяется один раз в начале и уменьшается по ходу
-        покупок — чтобы не потратить на дорогие/донатные больше, чем реально есть."""
+        """Проходит preferred_categories по порядку, покупая в каждой разрешённой
+        (тумблерами containers_buy_*) категории заданное количество (containers_qty_*,
+        0 = максимум доступного) — не больше, чем позволяют лимит игры и баланс.
+        Баланс проверяется один раз в начале и уменьшается по ходу покупок — чтобы
+        не потратить на дорогие/донатные больше, чем реально есть."""
         prefs = cfg.get("preferred_categories") or ["Донатный", "Дорогой", "Бюджетный"]
         results = []
         msg = shop_msg

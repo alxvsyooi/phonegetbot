@@ -120,7 +120,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "bulk_button": "купить оптом",
         "confirm_button": "подтвердить",
         "next_page_button": "➡",
-        "check_interval": 3600,   # как часто автозакупка проверяет магазин заново, сек
+        # срабатывает раз в сутки вместе с майнингом (то же account.mining_time по МСК),
+        # отдельного интервала опроса больше нет — телефоны не появляются каждые 10 минут
         "retry_interval": 5,      # пауза перед повтором клика, если бот принял его, но не ответил
         "retry_attempts": 3,      # сколько раз повторять один и тот же клик перед тем, как сдаться
     },
@@ -165,6 +166,9 @@ ACCOUNT_DEFAULTS: dict[str, Any] = {
     "containers_buy_budget": True,      # 📦 Бюджетный контейнер — покупать при рестоке
     "containers_buy_expensive": True,   # 📦 Дорогой контейнер
     "containers_buy_donation": True,    # 📦 Донатный контейнер
+    "containers_qty_budget": 0,         # сколько покупать за ресток, 0 = максимум доступного (игра+баланс)
+    "containers_qty_expensive": 0,
+    "containers_qty_donation": 0,
     "alerts_enabled": True,             # 🔔 алерты владельцу (капча, подозр. цена и т.п.) через управляющего бота
     "daily_reward_enabled": True,
     "self_commands_enabled": True,

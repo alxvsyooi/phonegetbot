@@ -200,10 +200,15 @@ class ControlBot:
         aid = acc["id"]
         def s(f):
             return "вкл ✅" if acc.get(f, True) else "выкл ❌"
+        def q(f):
+            return acc.get(f, 0) or "макс"
         return InlineKeyboardMarkup([
             [_btn(f"💰 Бюджетный: {s('containers_buy_budget')}", f"tcontb:{aid}")],
+            [_btn(f"Кол-во за ресток: {q('containers_qty_budget')}", f"setcqb:{aid}")],
             [_btn(f"💎 Дорогой: {s('containers_buy_expensive')}", f"tconte:{aid}")],
+            [_btn(f"Кол-во за ресток: {q('containers_qty_expensive')}", f"setcqe:{aid}")],
             [_btn(f"🎁 Донатный: {s('containers_buy_donation')}", f"tcontd:{aid}")],
+            [_btn(f"Кол-во за ресток: {q('containers_qty_donation')}", f"setcqd:{aid}")],
             [_btn("⬅️ Назад", f"autom:{aid}")],
         ])
 
@@ -459,6 +464,15 @@ class ControlBot:
                 await self._toggle_container_cat(q, acc, "containers_buy_expensive")
             elif data.startswith("tcontd:"):
                 await self._toggle_container_cat(q, acc, "containers_buy_donation")
+            elif data.startswith("setcqb:"):
+                self._ask(uid, aid, "containers_qty_budget")
+                await q.message.edit_text("Сколько бюджетных контейнеров покупать за ресток (0 — максимум доступного):")
+            elif data.startswith("setcqe:"):
+                self._ask(uid, aid, "containers_qty_expensive")
+                await q.message.edit_text("Сколько дорогих контейнеров покупать за ресток (0 — максимум доступного):")
+            elif data.startswith("setcqd:"):
+                self._ask(uid, aid, "containers_qty_donation")
+                await q.message.edit_text("Сколько донатных контейнеров покупать за ресток (0 — максимум доступного):")
             elif data.startswith("tselfcmd:"):
                 await self._toggle(q, acc, "self_commands_enabled", redisplay="autosend")
             elif data.startswith("setcard:"):
@@ -832,6 +846,16 @@ class ControlBot:
                 await m.reply("Нужно число очков (0 — отключить). Ещё раз:")
                 return
             acc[field] = int(val)
+        elif field in ("containers_qty_budget", "containers_qty_expensive", "containers_qty_donation"):
+            if not val.isdigit():
+                await m.reply("Нужно число (0 — максимум доступного). Ещё раз:")
+                return
+            acc[field] = int(val)
+            self.storage.save()
+            self.states.pop(uid, None)
+            await m.reply(f"📦 Категории контейнеров — <b>{acc.get('name')}</b>",
+                          reply_markup=self._container_categories_menu(acc))
+            return
         elif field == "phone_shop_rarity":
             if not val:
                 await m.reply("Не пусто. Ещё раз:")

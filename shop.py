@@ -8,6 +8,10 @@
 через «Купить оптом»: по умолчанию максимум предложенного количества, либо
 конкретное число (phone_shop_quantity), но не больше, чем позволяет баланс.
 
+Автоматизация срабатывает РАЗ В СУТКИ, вместе с майнингом (то же время
+mining_time по МСК) — телефоны в магазине не появляются заново каждые 10 минут,
+так что более частый опрос только зря дёргает игрового бота.
+
 Баланс («такк») проверяется ОДИН РАЗ в самом начале, ДО входа в магазин — если
 слать текстовую команду ПОСРЕДИ навигации по инлайн-кнопкам магазина, игровой бот,
 похоже, сбрасывает своё серверное состояние диалога, и кнопки на уже показанном
@@ -20,9 +24,10 @@ from __future__ import annotations
 import asyncio
 import re
 import time
+from datetime import datetime
 
 from storage import CARDS_BOT
-from common import clock, today_msk
+from common import clock, today_msk, MSK, parse_hhmm, seconds_until_msk
 
 _PRICE_RE = re.compile(r"цена покупки\s*:?\s*([\d\s.,]+)", re.IGNORECASE)
 _MODEL_BUTTON_RE = re.compile(r"^(.*?)\s*\(([\d\s.,]+)\s*точек\)\s*$", re.IGNORECASE)
@@ -79,24 +84,28 @@ class ShopModule:
         return self.account.get("enabled", True) and self.account.get("phone_shop_enabled", False)
 
     async def _auto_shop_loop(self) -> None:
+        """Раз в сутки, в mining_time по МСК — тот же принцип, что и у майнинга
+        (farm.py._mining_loop): опрос раз в 20с, время читается на лету."""
+        last_fired = None
         while self.running:
             try:
-                if self._trade_mode or not self._shop_active():
-                    await asyncio.sleep(30)
+                if self._trade_mode:
+                    await asyncio.sleep(2)
                     continue
-                now = time.time()
-                if now < self.shop_next_ts:
-                    await asyncio.sleep(min(60, self.shop_next_ts - now))
-                    continue
-                await self.buy_phones_now()
-                interval = max(60, int(self.shop_cfg.get("check_interval", 3600)))
-                self.shop_next_ts = time.time() + interval
+                hour, minute = parse_hhmm(self.account.get("mining_time"))
+                self.shop_next_ts = time.time() + seconds_until_msk(hour, minute)
+
+                now = datetime.now(MSK)
+                due = now.hour == hour and now.minute == minute and last_fired != now.date()
+                if due and self._shop_active():
+                    last_fired = now.date()
+                    await self.buy_phones_now()
+                await asyncio.sleep(20)
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
                 self.last_shop = f"ошибка: {e}"
-                self.shop_next_ts = time.time() + 300
-                await asyncio.sleep(5)
+                await asyncio.sleep(20)
 
     # ---------- клик с повтором, если бот просто не спешит с ответом ----------
     async def _click_retry(self, message, button_text: str, bot: str, cfg: dict, timeout: int = 15):
