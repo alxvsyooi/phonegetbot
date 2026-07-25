@@ -68,6 +68,8 @@ class _WorkerBase:
         self._trade_queue: asyncio.Queue | None = None
         self._task_next: dict[int, float] = {}   # tid -> время следующего запуска
         self._container_alert_sent = False       # чтобы не слать «ресток скоро» повторно на один и тот же ресток
+        self._captcha_relay_pending = False      # ждём цифру-ответ капчи от владельца (см. farm.py)
+        self._captcha_relay_deadline = 0.0
 
         now = 0.0
         self.card_next_ts = now

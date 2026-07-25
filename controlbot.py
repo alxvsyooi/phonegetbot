@@ -111,7 +111,8 @@ class ControlBot:
 
     def _accounts_menu(self, uid: int) -> InlineKeyboardMarkup:
         rows = []
-        for acc in self._my_accounts(uid):
+        accs = sorted(self._my_accounts(uid), key=lambda a: 0 if a.get("is_main") else 1)
+        for acc in accs:
             w = self.manager.workers.get(acc["id"])
             mark = "🟢" if (w and w.running and acc.get("enabled", True)) else "🔴"
             crown = "👑 " if acc.get("is_main") else ""
@@ -128,9 +129,8 @@ class ControlBot:
         al = "вкл ✅" if acc.get("alerts_enabled", True) else "выкл ❌"
         return InlineKeyboardMarkup([
             [_btn("⏸ Выключить" if en else "▶️ Включить", f"toggle:{aid}")],
-            [_btn("🌾 Фарм карточек", f"farm:{aid}"), _btn("📨 Автоотправка", f"autosend:{aid}")],
-            [_btn("🛠 Мастерская и магазин", f"workshop:{aid}")],
-            [_btn("🧾 Такс", f"taxx:{aid}"), _btn(f"🔔 Алерты: {al}", f"talerts:{aid}")],
+            [_btn("📱 Фарм карточек", f"farm:{aid}"), _btn("📨 Автоотправка", f"autosend:{aid}")],
+            [_btn(f"🔔 Алерты: {al}", f"talerts:{aid}")],
             [_btn("✏️ Имя", f"rename:{aid}"), _btn("🗑 Удалить", f"del:{aid}")],
             [_btn("🔄 Обновить", f"acc:{aid}"), _btn("⬅️ Назад", "list")],
         ])
@@ -149,7 +149,7 @@ class ControlBot:
 
     def _farm_text(self, acc: dict) -> str:
         fe = "вкл ✅" if acc.get("farm_enabled", True) else "выкл ❌"
-        return f"🌾 <b>Фарм карточек</b> — {acc.get('name')}\nМодуль: {fe}"
+        return f"📱 <b>Фарм карточек</b> — {acc.get('name')}\nМодуль: {fe}"
 
     def _targets_menu(self, acc: dict) -> InlineKeyboardMarkup:
         aid = acc["id"]
@@ -193,7 +193,22 @@ class ControlBot:
             [_btn(f"🤝 Авто-трейд: {s('autotrade_enabled', False)}", f"ttrade:{aid}")],
             [_btn(f"📦 Магазин контейнеров: {s('containers_enabled', False)}", f"tcont:{aid}")],
             [_btn("📦 Какие категории покупать →", f"contcat:{aid}")],
+            [_btn(f"🔢 Капча: слать текст в личку: {s('containers_captcha_relay_enabled', False)}",
+                  f"tcaprelay:{aid}")],
+            [_btn(f"🛠 Автопочинка своих телефонов: {s('auto_repair_enabled', False)}", f"trepair:{aid}")],
+            [_btn(f"📥 Автопринятие чужих заказов: {s('auto_accept_enabled', False)}", f"taccept:{aid}")],
+            [_btn(f"🏪 Автозакупка телефонов: {s('phone_shop_enabled', False)}", f"tshop:{aid}")],
+            [_btn("🏪 Настройки автозакупки телефонов →", f"phoneshop:{aid}")],
             [_btn("⬅️ Назад", f"farm:{aid}")],
+        ])
+
+    def _phone_shop_settings_menu(self, acc: dict) -> InlineKeyboardMarkup:
+        aid = acc["id"]
+        qty = acc.get("phone_shop_quantity", 0) or "макс"
+        return InlineKeyboardMarkup([
+            [_btn(f"🏪 Редкость закупки: {acc.get('phone_shop_rarity', 'Ширпотреб')}", f"setrarity:{aid}")],
+            [_btn(f"🏪 Кол-во за раз: {qty}", f"setqty:{aid}")],
+            [_btn("⬅️ Назад", f"autom:{aid}")],
         ])
 
     def _container_categories_menu(self, acc: dict) -> InlineKeyboardMarkup:
@@ -227,6 +242,9 @@ class ControlBot:
             [_btn("⛏ Собрать майнинг сейчас", f"mine:{aid}")],
             [_btn("🔄 Слить телефоны (по 🎯 получателю трейда)", f"exch:{aid}")],
             [_btn("📦 Проверить магазин контейнеров", f"checkcont:{aid}")],
+            [_btn("🧾 Такс (баланс)", f"taxx:{aid}")],
+            [_btn("🛠 Почистить нерабочие сейчас", f"repairnow:{aid}")],
+            [_btn("🏪 Купить телефоны сейчас", f"shopnow:{aid}")],
             [_btn("💸 Перевести человеку", f"paystart:{aid}")],
             [_btn("🤝 Трейд с человеком", f"tradestart:{aid}")],
         ]
@@ -235,34 +253,6 @@ class ControlBot:
             rows.append([_btn("💧 Слить твинкам сейчас", f"draindo:{aid}")])
         rows.append([_btn("⬅️ Назад", f"farm:{aid}")])
         return InlineKeyboardMarkup(rows)
-
-    # ---------- 🛠 Мастерская и магазин (независимый модуль) ----------
-    def _workshop_menu(self, acc: dict) -> InlineKeyboardMarkup:
-        aid = acc["id"]
-        def s(f):
-            return "вкл ✅" if acc.get(f, False) else "выкл ❌"
-        qty = acc.get("phone_shop_quantity", 0) or "макс"
-        return InlineKeyboardMarkup([
-            [_btn(f"🛠 Автопочинка своих телефонов: {s('auto_repair_enabled')}", f"trepair:{aid}")],
-            [_btn(f"📥 Автопринятие чужих заказов: {s('auto_accept_enabled')}", f"taccept:{aid}")],
-            [_btn(f"🏪 Автозакупка телефонов: {s('phone_shop_enabled')}", f"tshop:{aid}")],
-            [_btn(f"🏪 Редкость закупки: {acc.get('phone_shop_rarity', 'Ширпотреб')}", f"setrarity:{aid}")],
-            [_btn(f"🏪 Кол-во за раз: {qty}", f"setqty:{aid}")],
-            [_btn("🛠 Почистить нерабочие сейчас", f"repairnow:{aid}")],
-            [_btn("🏪 Купить телефоны сейчас", f"shopnow:{aid}")],
-            [_btn("⬅️ Назад", f"acc:{aid}")],
-        ])
-
-    def _workshop_text(self, acc: dict) -> str:
-        w = self.manager.workers.get(acc["id"])
-        lines = [f"🛠 <b>Мастерская и магазин</b> — {acc.get('name')}"]
-        if w:
-            lines += [
-                f"🛠 Автопочинка: {w.last_repair}",
-                f"📥 Автопринятие: {w.last_accept}",
-                f"🏪 Автозакупка: {w.last_shop}",
-            ]
-        return "\n".join(lines)
 
     @staticmethod
     def _task_sched(t: dict) -> str:
@@ -396,11 +386,12 @@ class ControlBot:
                 await q.message.edit_text(self._farm_text(acc), reply_markup=self._farm_menu(acc))
             elif data.startswith("autosend:"):
                 await q.message.edit_text(self._autosend_text(acc), reply_markup=self._autosend_menu(acc))
-            elif data.startswith("workshop:"):
-                await q.message.edit_text(self._workshop_text(acc), reply_markup=self._workshop_menu(acc))
             elif data.startswith("autom:"):
                 await q.message.edit_text(f"⚙️ Автоматизация — <b>{acc.get('name')}</b>",
                                           reply_markup=self._automation_menu(acc))
+            elif data.startswith("phoneshop:"):
+                await q.message.edit_text(f"🏪 Настройки автозакупки телефонов — <b>{acc.get('name')}</b>",
+                                          reply_markup=self._phone_shop_settings_menu(acc))
             elif data.startswith("intervals:"):
                 await q.message.edit_text(f"⏱ Интервалы — <b>{acc.get('name')}</b>",
                                           reply_markup=self._intervals_menu(acc))
@@ -516,11 +507,13 @@ class ControlBot:
             elif data.startswith("draindo:"):
                 await self._start_drain(q, acc)
             elif data.startswith("trepair:"):
-                await self._toggle(q, acc, "auto_repair_enabled", redisplay="workshop")
+                await self._toggle(q, acc, "auto_repair_enabled")
             elif data.startswith("taccept:"):
-                await self._toggle(q, acc, "auto_accept_enabled", redisplay="workshop")
+                await self._toggle(q, acc, "auto_accept_enabled")
             elif data.startswith("tshop:"):
-                await self._toggle(q, acc, "phone_shop_enabled", redisplay="workshop")
+                await self._toggle(q, acc, "phone_shop_enabled")
+            elif data.startswith("tcaprelay:"):
+                await self._toggle(q, acc, "containers_captcha_relay_enabled")
             elif data.startswith("setrarity:"):
                 self._ask(uid, aid, "phone_shop_rarity")
                 await q.message.edit_text(
@@ -549,6 +542,14 @@ class ControlBot:
                 await q.answer("Пропущено")
                 await q.message.edit_text(f"⏭ Пропущено — «{acc.get('name')}»",
                                           reply_markup=self._account_menu(acc))
+                return
+            elif data.startswith("caprelay:"):
+                digits = data.split(":", 2)[2]
+                w = self.manager.workers.get(aid)
+                if not w or not getattr(w, "_captcha_relay_pending", False):
+                    return await q.answer("Уже неактуально", show_alert=True)
+                await q.answer(f"⏳ Отправляю «{digits}»...")
+                asyncio.create_task(self._run_captcha_relay(q, aid, w, digits))
                 return
             elif data.startswith("del:"):
                 await q.message.edit_text(
@@ -609,6 +610,7 @@ class ControlBot:
         default = False if field in (
             "autotrade_enabled", "containers_enabled",
             "auto_repair_enabled", "auto_accept_enabled", "phone_shop_enabled",
+            "containers_captcha_relay_enabled",
         ) else True
         acc[field] = not acc.get(field, default)
         self.storage.save()
@@ -623,8 +625,6 @@ class ControlBot:
             await q.message.edit_text(self._farm_text(acc), reply_markup=self._farm_menu(acc))
         elif redisplay == "autosend":
             await q.message.edit_text(self._autosend_text(acc), reply_markup=self._autosend_menu(acc))
-        elif redisplay == "workshop":
-            await q.message.edit_text(self._workshop_text(acc), reply_markup=self._workshop_menu(acc))
         else:  # "automation" — фарм-подтумблеры (карточки/рулетка/майнинг/…)
             await q.message.edit_text(f"⚙️ Автоматизация — <b>{acc.get('name')}</b>",
                                       reply_markup=self._automation_menu(acc))
@@ -763,7 +763,7 @@ class ControlBot:
     async def _run_repair_now(self, q: CallbackQuery, aid: int, w) -> None:
         result = await w.repair_now()
         acc = self.storage.get(aid)
-        await self._safe_edit(q, self._workshop_text(acc) + f"\n\n🛠 {result}", self._workshop_menu(acc))
+        await self._safe_edit(q, self._account_text(acc) + f"\n\n🛠 {result}", self._account_menu(acc))
 
     async def _start_shop_now(self, q: CallbackQuery, aid: int) -> None:
         w = self.manager.workers.get(aid)
@@ -775,7 +775,7 @@ class ControlBot:
     async def _run_shop_now(self, q: CallbackQuery, aid: int, w) -> None:
         result = await w.buy_phones_now()
         acc = self.storage.get(aid)
-        await self._safe_edit(q, self._workshop_text(acc) + f"\n\n🏪 {result}", self._workshop_menu(acc))
+        await self._safe_edit(q, self._account_text(acc) + f"\n\n🏪 {result}", self._account_menu(acc))
 
     async def _run_broadcast(self, q: CallbackQuery, uid: int, text: str) -> None:
         owners = {a.get("owner_id") for a in self.storage.accounts if a.get("owner_id")}
@@ -810,10 +810,51 @@ class ControlBot:
             except Exception:
                 pass
 
+    def _pending_captcha_relay(self, uid: int) -> list[tuple[dict, Any]]:
+        """Свои аккаунты, у которых сейчас ждём цифру-ответ капчи (тумблер
+        containers_captcha_relay_enabled) и окно ожидания ещё не истекло."""
+        now = time.time()
+        result = []
+        for acc in self._my_accounts(uid):
+            w = self.manager.workers.get(acc["id"])
+            if w and getattr(w, "_captcha_relay_pending", False) and now < getattr(w, "_captcha_relay_deadline", 0):
+                result.append((acc, w))
+        return result
+
+    async def _run_captcha_relay(self, reply_to: Message | CallbackQuery, aid: int, w, digits: str) -> None:
+        result = await w.send_captcha_digits(digits)
+        acc = self.storage.get(aid)
+        text = f"{self._account_text(acc)}\n\n📦 {result}" if acc else f"📦 {result}"
+        markup = self._account_menu(acc) if acc else None
+        if isinstance(reply_to, CallbackQuery):
+            await self._safe_edit(reply_to, text, markup)
+        else:
+            await reply_to.reply(text, reply_markup=markup)
+
     # ============ текстовый ввод (FSM) ============
     async def _on_text(self, m: Message) -> None:
-        state = self.states.get(m.from_user.id)
+        uid = m.from_user.id
+        state = self.states.get(uid)
         if not state:
+            # никакого явного флоу («задай интервал» и т.п.) сейчас не ждём от
+            # пользователя — можно проверить, не цифра ли это ответ на капчу
+            # контейнеров (тумблер containers_captcha_relay_enabled). Если явный
+            # флоу ЕСТЬ (например, «отправь интервал карточек») — цифру всегда
+            # считаем ответом на НЕГО, капча-релей подождёт следующего сообщения.
+            txt = (m.text or "").strip()
+            if txt.isdigit():
+                pending = self._pending_captcha_relay(uid)
+                if len(pending) == 1:
+                    acc, w = pending[0]
+                    await m.reply(f"⏳ Отправляю «{txt}» игровому боту от «{acc.get('name')}»...")
+                    asyncio.create_task(self._run_captcha_relay(m, acc["id"], w, txt))
+                    return
+                if len(pending) > 1:
+                    rows = [[_btn(acc.get("name"), f"caprelay:{acc['id']}:{txt}")] for acc, _ in pending]
+                    await m.reply(
+                        "У тебя капча ждёт цифру-ответ сразу у нескольких аккаунтов — кому отправить?",
+                        reply_markup=InlineKeyboardMarkup(rows))
+                    return
             return
         if state.get("flow") == "set":
             await self._handle_set(m, state)
@@ -863,7 +904,8 @@ class ControlBot:
             acc[field] = val
             self.storage.save()
             self.states.pop(uid, None)
-            await m.reply(self._workshop_text(acc), reply_markup=self._workshop_menu(acc))
+            await m.reply(f"🏪 Настройки автозакупки телефонов — <b>{acc.get('name')}</b>",
+                          reply_markup=self._phone_shop_settings_menu(acc))
             return
         elif field == "phone_shop_quantity":
             if not val.isdigit():
@@ -872,7 +914,8 @@ class ControlBot:
             acc[field] = int(val)
             self.storage.save()
             self.states.pop(uid, None)
-            await m.reply(self._workshop_text(acc), reply_markup=self._workshop_menu(acc))
+            await m.reply(f"🏪 Настройки автозакупки телефонов — <b>{acc.get('name')}</b>",
+                          reply_markup=self._phone_shop_settings_menu(acc))
             return
         elif field == "mining_time":
             mt = re.match(r"^\s*(\d{1,2})[:.\s](\d{1,2})\s*$", val)

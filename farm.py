@@ -199,6 +199,20 @@ def _max_numeric_button(message) -> str | None:
     return best_t
 
 
+def _numeric_button(message, value: int | None) -> str | None:
+    """Кнопка-число, ТОЧНО равная value (не подстрока — «2» не должно попадать
+    в «20»/«12»). Используется вместо _find_button() для выбора количества:
+    подстрочный поиск там мог по ошибке ткнуть в другое число (см. shop.py,
+    где та же проблема уже была исправлена этим же способом)."""
+    if not value:
+        return None
+    for t in _all_buttons(message):
+        stripped = t.strip()
+        if stripped.isdigit() and int(stripped) == value:
+            return t
+    return None
+
+
 class FarmModule:
     """Миксин с игровой автоматизацией. Ожидает от связанного класса: self.account,
     self.client, self.running, self._trade_mode, self._send_and_wait, self._click_and_wait,
@@ -685,7 +699,7 @@ class FarmModule:
             qty_msg = await self._click_step(bot, detail, bulk_btn, cfg, timeout=15)
             if qty_msg is None:
                 return False, f"{category_label}: нет ответа на «купить оптом»", 0
-            qty_btn = _find_button(qty_msg, str(remaining)) or _max_numeric_button(qty_msg)
+            qty_btn = _numeric_button(qty_msg, remaining) or _max_numeric_button(qty_msg)
             if not qty_btn:
                 return False, f"{category_label}: не нашёл кнопку количества", 0
             step = await self._click_step(bot, qty_msg, qty_btn, cfg, timeout=15)
@@ -715,9 +729,8 @@ class FarmModule:
         msg = shop_msg
         open_cmd = cfg.get("open_command") or CONTAINER_WORD
         balance = await self._check_balance()
-        for label in prefs:
-            if not self._category_allowed(label):
-                continue
+        remaining_labels = [l for l in prefs if self._category_allowed(l)]
+        for i, label in enumerate(remaining_labels):
             if balance is not None and balance <= 0:
                 break
             ok, info, spent = await self._buy_category(bot, msg, label, cfg, balance)
@@ -725,6 +738,12 @@ class FarmModule:
                 results.append(info)
                 if balance is not None:
                     balance -= spent
+            # Обновляем меню магазина заново перед следующей категорией НЕЗАВИСИМО
+            # от успеха — если попытка дошла до клика внутри категории (даже
+            # неудачно, напр. таймаут на «купить оптом»), диалог игрового бота мог
+            # сдвинуться с исходного меню, и клик по СТАРОМУ сообщению для следующей
+            # категории просто перестаёт отвечать (флоу «зависает» точно на этом шаге).
+            if i < len(remaining_labels) - 1:
                 refreshed = await self._send_and_wait(bot, open_cmd, timeout=20)
                 if refreshed is not None:
                     msg = refreshed
@@ -775,10 +794,60 @@ class FarmModule:
         rows.append([InlineKeyboardButton("⏭ Пропустить в этот раз", callback_data=f"capskip:{self.id}")])
         return InlineKeyboardMarkup(rows)
 
+    def _captcha_alert_allowed(self) -> bool:
+        """Если у владельца есть 👑 главный аккаунт — об капче контейнеров пишет
+        только он (чтобы не заваливать владельца одинаковыми алертами с каждого
+        из его аккаунтов). Если главный не назначен — как раньше, пишут все."""
+        owner_id = self.account.get("owner_id")
+        if not owner_id or not self.storage:
+            return True
+        siblings = [a for a in self.storage.accounts if a.get("owner_id") == owner_id]
+        main = next((a for a in siblings if a.get("is_main")), None)
+        return main is None or main.get("id") == self.id
+
+    async def _notify_owner_captcha_relay(self, shop_text: str | None) -> None:
+        """Альтернатива алерту с кнопками (тумблер containers_captcha_relay_enabled):
+        пересылает сырой текст капчи владельцу и ждёт от него ЦИФРУ ответом прямо в
+        чате с управляющим ботом — controlbot.py её подхватит и отправит через
+        send_captcha_digits()."""
+        owner_id = self.account.get("owner_id")
+        preview = shop_text.strip() if shop_text else "(текст капчи не распознан)"
+        text = (
+            f"🚨 Капча — магазин контейнеров, «{self.name}»\n\n"
+            f"«{preview[:500]}»\n\n"
+            f"Реши капчу и пришли мне сюда ТОЛЬКО цифру ответа — я сам отправлю её игровому боту."
+        )
+        self._captcha_relay_pending = True
+        self._captcha_relay_deadline = time.time() + 900
+        if not self.alert_fn:
+            print(f"[{self.name}] alert_fn не подключен — алерт капчи (релей) не отправлен")
+            return
+        try:
+            await self.alert_fn(owner_id, text, None)
+        except Exception as e:  # noqa: BLE001
+            print(f"[{self.name}] не удалось отправить алерт капчи (релей): {e}")
+
+    async def send_captcha_digits(self, digits: str) -> str:
+        """Отправляет цифру-ответ капчи от лица аккаунта игровому боту (владелец
+        решил её сам и прислал ответ в личку управляющему боту), затем один раз
+        пробует продолжить магазин — как кнопка «✅ Как настроено» в обычном алерте."""
+        self._captcha_relay_pending = False
+        if not self.client or not self.running:
+            return "аккаунт не запущен"
+        await self.client.send_message(CARDS_BOT, digits)
+        await asyncio.sleep(2)
+        return await self.resume_container_check()
+
     async def _notify_owner_captcha(self, cfg: dict, shop_text: str | None, reason: str = "captcha") -> None:
         owner_id = self.account.get("owner_id")
         if not owner_id or not self.account.get("alerts_enabled", True):
             return
+        if reason == "captcha":
+            if not self._captcha_alert_allowed():
+                return
+            if self.account.get("containers_captcha_relay_enabled", False):
+                await self._notify_owner_captcha_relay(shop_text)
+                return
         alert = cfg.get("captcha_alert_text", "КАПЧА")
         preview = f"\n\n«{shop_text[:300]}»" if shop_text else ""
         if reason == "captcha":

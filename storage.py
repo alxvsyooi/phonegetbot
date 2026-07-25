@@ -170,6 +170,7 @@ ACCOUNT_DEFAULTS: dict[str, Any] = {
     "containers_qty_expensive": 0,
     "containers_qty_donation": 0,
     "alerts_enabled": True,             # 🔔 алерты владельцу (капча, подозр. цена и т.п.) через управляющего бота
+    "containers_captcha_relay_enabled": False,  # 🔢 капча контейнеров: слать текст в личку и релеить цифру-ответ
     "daily_reward_enabled": True,
     "self_commands_enabled": True,
     "card_interval": 3600,
