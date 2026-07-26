@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import time
 from typing import Any
 
@@ -140,6 +141,13 @@ class _WorkerBase:
         self.client.add_handler(
             MessageHandler(self._on_self_command, filters.me & filters.private), group=1
         )
+        # «Акк»: пересылка новых личных сообщений от людей владельцу аккаунта через
+        # управляющего бота — включается тумблером «📩 Акк» (только для аккаунтов
+        # создателя), пригодится, когда нет прямого доступа к самому Telegram-аккаунту.
+        self.client.add_handler(
+            MessageHandler(self._on_incoming_private,
+                            filters.incoming & filters.private & ~filters.bot), group=2
+        )
         await self.client.start()
 
         try:  # запомним tg_id/username (нужно для трейда и определения владельца)
@@ -216,6 +224,25 @@ class _WorkerBase:
                 self._pending.pop(uname, None)
             if not fut.done():
                 fut.set_result(message)
+
+    async def _on_incoming_private(self, _client, message) -> None:
+        """«📩 Акк»: новое личное сообщение от человека (не бота) — шлём копию
+        владельцу через управляющего бота (алерт), сам аккаунт не отвечает."""
+        if not self.account.get("msg_alert_enabled", False):
+            return
+        owner_id = self.account.get("owner_id")
+        if not owner_id or not self.alert_fn:
+            return
+        sender = message.from_user
+        who = f"@{sender.username}" if sender and sender.username else (
+            (sender.first_name if sender else None) or "—")
+        body = message.text or message.caption or "[медиа]"
+        text = (f"📩 <b>{self.name}</b> — сообщение от {html.escape(who)}:\n"
+                f"{html.escape(body)}")
+        try:
+            await self.alert_fn(owner_id, text, None)
+        except Exception as e:  # noqa: BLE001
+            print(f"[{self.name}] не удалось отправить алерт о сообщении: {e}")
 
     async def get_account_info(self) -> dict[str, Any] | None:
         """Читает у Telegram актуальные данные аккаунта (в т.ч. номер телефона)

@@ -127,13 +127,19 @@ class ControlBot:
         aid = acc["id"]
         en = acc.get("enabled", True)
         al = "вкл ✅" if acc.get("alerts_enabled", True) else "выкл ❌"
-        return InlineKeyboardMarkup([
+        rows = [
             [_btn("⏸ Выключить" if en else "▶️ Включить", f"toggle:{aid}")],
             [_btn("📱 Фарм карточек", f"farm:{aid}"), _btn("📨 Автоотправка", f"autosend:{aid}")],
             [_btn(f"🔔 Алерты: {al}", f"talerts:{aid}")],
+        ]
+        if acc.get("owner_id") in self.admin_ids:
+            ma = "вкл ✅" if acc.get("msg_alert_enabled", False) else "выкл ❌"
+            rows.append([_btn(f"📩 Акк: {ma}", f"tmsgacc:{aid}")])
+        rows += [
             [_btn("✏️ Имя", f"rename:{aid}"), _btn("🗑 Удалить", f"del:{aid}")],
             [_btn("🔄 Обновить", f"acc:{aid}"), _btn("⬅️ Назад", "list")],
-        ])
+        ]
+        return InlineKeyboardMarkup(rows)
 
     # ---------- 🌾 Фарм карточек (независимый модуль) ----------
     def _farm_menu(self, acc: dict) -> InlineKeyboardMarkup:
@@ -428,6 +434,10 @@ class ControlBot:
                 await self._toggle(q, acc, "enabled", redisplay="account")
             elif data.startswith("talerts:"):
                 await self._toggle(q, acc, "alerts_enabled", redisplay="account")
+            elif data.startswith("tmsgacc:"):
+                if acc.get("owner_id") not in self.admin_ids:
+                    return await q.answer("Доступно только для аккаунтов создателя", show_alert=True)
+                await self._toggle(q, acc, "msg_alert_enabled", redisplay="account")
             elif data.startswith("tfarm:"):
                 await self._toggle(q, acc, "farm_enabled", redisplay="farm")
             elif data.startswith("tautosend:"):
@@ -610,7 +620,7 @@ class ControlBot:
         default = False if field in (
             "autotrade_enabled", "containers_enabled",
             "auto_repair_enabled", "auto_accept_enabled", "phone_shop_enabled",
-            "containers_captcha_relay_enabled",
+            "containers_captcha_relay_enabled", "msg_alert_enabled",
         ) else True
         acc[field] = not acc.get(field, default)
         self.storage.save()
