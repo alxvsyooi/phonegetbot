@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import os
 import re
 import time
@@ -133,13 +134,37 @@ class ControlBot:
             [_btn(f"🔔 Алерты: {al}", f"talerts:{aid}")],
         ]
         if acc.get("owner_id") in self.admin_ids:
-            ma = "вкл ✅" if acc.get("msg_alert_enabled", False) else "выкл ❌"
-            rows.append([_btn(f"📩 Акк: {ma}", f"tmsgacc:{aid}")])
+            n = len(acc.get("msg_log", []))
+            rows.append([_btn(f"📩 Акк ({n})" if n else "📩 Акк", f"msgacc:{aid}")])
         rows += [
             [_btn("✏️ Имя", f"rename:{aid}"), _btn("🗑 Удалить", f"del:{aid}")],
             [_btn("🔄 Обновить", f"acc:{aid}"), _btn("⬅️ Назад", "list")],
         ]
         return InlineKeyboardMarkup(rows)
+
+    # ---------- 📩 Акк (только создатель) ----------
+    def _msgacc_text(self, acc: dict) -> str:
+        ma = "вкл ✅" if acc.get("msg_alert_enabled", False) else "выкл ❌"
+        log = acc.get("msg_log", [])
+        if not log:
+            body = "Сообщений пока нет."
+        else:
+            body = "\n\n".join(
+                f"🕐 {html.escape(m.get('ts', '—'))} — <b>{html.escape(m.get('from', '—'))}</b>:\n"
+                f"{html.escape(m.get('text', ''))}"
+                for m in reversed(log)
+            )
+        return (f"📩 <b>Акк</b> — {acc.get('name')}\n"
+                f"Улавливать новые сообщения: {ma}\n\n{body}")
+
+    def _msgacc_menu(self, acc: dict) -> InlineKeyboardMarkup:
+        aid = acc["id"]
+        ma = "вкл ✅" if acc.get("msg_alert_enabled", False) else "выкл ❌"
+        return InlineKeyboardMarkup([
+            [_btn(f"🔔 Улавливать: {ma}", f"tmsgacc:{aid}")],
+            [_btn("🔄 Обновить", f"msgacc:{aid}"), _btn("🗑 Очистить историю", f"clrmsgacc:{aid}")],
+            [_btn("⬅️ Назад", f"acc:{aid}")],
+        ])
 
     # ---------- 🌾 Фарм карточек (независимый модуль) ----------
     def _farm_menu(self, acc: dict) -> InlineKeyboardMarkup:
@@ -434,10 +459,20 @@ class ControlBot:
                 await self._toggle(q, acc, "enabled", redisplay="account")
             elif data.startswith("talerts:"):
                 await self._toggle(q, acc, "alerts_enabled", redisplay="account")
+            elif data.startswith("msgacc:"):
+                if acc.get("owner_id") not in self.admin_ids:
+                    return await q.answer("Доступно только для аккаунтов создателя", show_alert=True)
+                await q.message.edit_text(self._msgacc_text(acc), reply_markup=self._msgacc_menu(acc))
             elif data.startswith("tmsgacc:"):
                 if acc.get("owner_id") not in self.admin_ids:
                     return await q.answer("Доступно только для аккаунтов создателя", show_alert=True)
-                await self._toggle(q, acc, "msg_alert_enabled", redisplay="account")
+                await self._toggle(q, acc, "msg_alert_enabled", redisplay="msgacc")
+            elif data.startswith("clrmsgacc:"):
+                if acc.get("owner_id") not in self.admin_ids:
+                    return await q.answer("Доступно только для аккаунтов создателя", show_alert=True)
+                acc["msg_log"] = []
+                self.storage.save()
+                await q.message.edit_text(self._msgacc_text(acc), reply_markup=self._msgacc_menu(acc))
             elif data.startswith("tfarm:"):
                 await self._toggle(q, acc, "farm_enabled", redisplay="farm")
             elif data.startswith("tautosend:"):
@@ -635,6 +670,8 @@ class ControlBot:
             await q.message.edit_text(self._farm_text(acc), reply_markup=self._farm_menu(acc))
         elif redisplay == "autosend":
             await q.message.edit_text(self._autosend_text(acc), reply_markup=self._autosend_menu(acc))
+        elif redisplay == "msgacc":
+            await q.message.edit_text(self._msgacc_text(acc), reply_markup=self._msgacc_menu(acc))
         else:  # "automation" — фарм-подтумблеры (карточки/рулетка/майнинг/…)
             await q.message.edit_text(f"⚙️ Автоматизация — <b>{acc.get('name')}</b>",
                                       reply_markup=self._automation_menu(acc))

@@ -226,17 +226,28 @@ class _WorkerBase:
                 fut.set_result(message)
 
     async def _on_incoming_private(self, _client, message) -> None:
-        """«📩 Акк»: новое личное сообщение от человека (не бота) — шлём копию
-        владельцу через управляющего бота (алерт), сам аккаунт не отвечает."""
+        """«📩 Акк»: новое личное сообщение от человека (не бота) — сохраняем в
+        историю (видна в разделе «📩 Акк» карточки аккаунта) и дублируем владельцу
+        алертом через управляющего бота; сам аккаунт не отвечает."""
         if not self.account.get("msg_alert_enabled", False):
-            return
-        owner_id = self.account.get("owner_id")
-        if not owner_id or not self.alert_fn:
             return
         sender = message.from_user
         who = f"@{sender.username}" if sender and sender.username else (
             (sender.first_name if sender else None) or "—")
         body = message.text or message.caption or "[медиа]"
+
+        log = self.account.setdefault("msg_log", [])
+        log.append({"from": who, "text": body[:500], "ts": time.strftime("%d.%m %H:%M")})
+        del log[:-20]  # держим только последние 20
+        if self.storage:
+            try:
+                self.storage.save()
+            except Exception:
+                pass
+
+        owner_id = self.account.get("owner_id")
+        if not owner_id or not self.alert_fn:
+            return
         text = (f"📩 <b>{self.name}</b> — сообщение от {html.escape(who)}:\n"
                 f"{html.escape(body)}")
         try:
