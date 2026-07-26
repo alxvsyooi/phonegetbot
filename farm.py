@@ -925,8 +925,9 @@ class FarmModule:
             return False
 
     async def _payout(self) -> None:
-        """«такк» -> «Точки: N» -> /pay <получатель> N -> Подтвердить.
-        Получатель — payout_target, который пользователь задал сам (@username или id)."""
+        """«такк» -> «Точки: N» -> /pay <получатель> N*процент -> Подтвердить.
+        Получатель — payout_target, доля — autopay_percent (свои же задают, по
+        умолчанию 100%; остаток можно держать на балансе, например на ремонт)."""
         try:
             target = (self.account.get("payout_target") or "").strip()
             if not target:
@@ -935,23 +936,47 @@ class FarmModule:
             await asyncio.sleep(max(0, int(self.payout_delay)))
             if not self.running:
                 return
-            bal = await self._send_and_wait(CARDS_BOT, BALANCE_WORD)
-            amount = parse_points(getattr(bal, "text", None) or getattr(bal, "caption", None))
-            if not amount or amount <= 0:
-                self.last_payout = f"нет очков для вывода ({clock()})"
-                return
-            pay = await self._send_and_wait(CARDS_BOT, f"/pay {target} {amount}")
-            if await self._try_click(pay, PAY_CONFIRM_BUTTON):
-                self._bump("paid", amount)
-                self.last_payout = f"💸 выведено {amount} -> {target} ({clock()} {today_msk()})"
-            elif pay is None:
-                self.last_payout = f"⚠️ нет ответа на /pay ({clock()})"
-            else:
-                self.last_payout = f"⚠️ кнопка Подтвердить не найдена ({clock()})"
+            percent = int(self.account.get("autopay_percent", 100))
+            await self._run_payout(target, percent)
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
             self.last_payout = f"ошибка вывода: {e}"
+
+    async def payout_all_now(self) -> str:
+        """«▶️ Действия -> Вывести всё» — ручной разовый вывод 100% баланса, без
+        задержки и независимо от процента автовывода. Доступно в меню, когда сам
+        автовывод выключен (иначе он и так регулярно выводит свою долю)."""
+        target = (self.account.get("payout_target") or "").strip()
+        if not target:
+            return "⚠️ получатель вывода не задан (🎯 Получатели)"
+        try:
+            return await self._run_payout(target, 100)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            self.last_payout = f"ошибка вывода: {e}"
+            return self.last_payout
+
+    async def _run_payout(self, target: str, percent: int) -> str:
+        bal = await self._send_and_wait(CARDS_BOT, BALANCE_WORD)
+        total = parse_points(getattr(bal, "text", None) or getattr(bal, "caption", None))
+        if not total or total <= 0:
+            self.last_payout = f"нет очков для вывода ({clock()})"
+            return self.last_payout
+        amount = total if percent >= 100 else int(total * percent / 100)
+        if amount <= 0:
+            self.last_payout = f"остаток слишком мал для вывода при {percent}% ({clock()})"
+            return self.last_payout
+        pay = await self._send_and_wait(CARDS_BOT, f"/pay {target} {amount}")
+        if await self._try_click(pay, PAY_CONFIRM_BUTTON):
+            self._bump("paid", amount)
+            self.last_payout = f"💸 выведено {amount} ({percent}%) -> {target} ({clock()} {today_msk()})"
+        elif pay is None:
+            self.last_payout = f"⚠️ нет ответа на /pay ({clock()})"
+        else:
+            self.last_payout = f"⚠️ кнопка Подтвердить не найдена ({clock()})"
+        return self.last_payout
 
     async def manual_pay(self, target: str, amount: int) -> str:
         """Ручной разовый перевод очков произвольному получателю произвольной суммой —

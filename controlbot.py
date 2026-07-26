@@ -218,6 +218,7 @@ class ControlBot:
             [_btn(f"⛏ Майнинг: {s('mining_enabled')}", f"tmine:{aid}")],
             [_btn(f"🎁 Ежедневная награда: {s('daily_reward_enabled')}", f"tdaily:{aid}")],
             [_btn(f"💸 Авто-вывод: {s('autopay_enabled')}", f"tpay:{aid}")],
+            [_btn(f"💸 Процент вывода: {acc.get('autopay_percent', 100)}%", f"setpaypercent:{aid}")],
             [_btn(f"🤝 Авто-трейд: {s('autotrade_enabled', False)}", f"ttrade:{aid}")],
             [_btn(f"📦 Магазин контейнеров: {s('containers_enabled', False)}", f"tcont:{aid}")],
             [_btn("📦 Какие категории покупать →", f"contcat:{aid}")],
@@ -276,6 +277,8 @@ class ControlBot:
             [_btn("💸 Перевести человеку", f"paystart:{aid}")],
             [_btn("🤝 Трейд с человеком", f"tradestart:{aid}")],
         ]
+        if not acc.get("autopay_enabled", True):
+            rows.append([_btn("💸 Вывести всё", f"payoutall:{aid}")])
         if acc.get("is_main"):
             rows.append([_btn(f"💰 Сумма слива твинкам: {acc.get('drain_amount', 0)}", f"setdrain:{aid}")])
             rows.append([_btn("💧 Слить твинкам сейчас", f"draindo:{aid}")])
@@ -517,6 +520,11 @@ class ControlBot:
             elif data.startswith("setmtime:"):
                 self._ask(uid, aid, "mining_time")
                 await q.message.edit_text("Отправь время майнинга по МСК ЧЧ:ММ (напр. 01:00):")
+            elif data.startswith("setpaypercent:"):
+                self._ask(uid, aid, "autopay_percent")
+                await q.message.edit_text(
+                    "Какой процент баланса выводить автовыводом (1-100)? Остальное "
+                    "останется на балансе (например, на ремонт телефонов):")
             elif data.startswith("rename:"):
                 self._ask(uid, aid, "name")
                 await q.message.edit_text("Отправь новое имя аккаунта:")
@@ -524,6 +532,8 @@ class ControlBot:
                 await self._collect_mining(q, aid)
             elif data.startswith("exch:"):
                 await self._start_trade(q, aid)
+            elif data.startswith("payoutall:"):
+                await self._start_payout_all(q, aid)
             elif data.startswith("taxx:"):
                 await self._start_show_balance(q, aid)
             elif data.startswith("checkcont:"):
@@ -766,6 +776,19 @@ class ControlBot:
         await self._safe_edit(q, self._account_text(acc) + f"\n\n🔄 Результат: {result}",
                               self._account_menu(acc))
 
+    async def _start_payout_all(self, q: CallbackQuery, aid: int) -> None:
+        w = self.manager.workers.get(aid)
+        if not w or not w.running:
+            return await q.answer("Аккаунт не запущен", show_alert=True)
+        await q.answer("⏳ Вывожу всё...")
+        asyncio.create_task(self._run_payout_all(q, aid, w))
+
+    async def _run_payout_all(self, q: CallbackQuery, aid: int, w) -> None:
+        result = await w.payout_all_now()
+        acc = self.storage.get(aid)
+        await self._safe_edit(q, self._account_text(acc) + f"\n\n💸 {result}",
+                              self._actions_menu(acc))
+
     @staticmethod
     def _twink_ident(acc: dict) -> str:
         """Числовой tg_id надёжнее username (тот можно сменить/потерять) — тот же
@@ -970,6 +993,16 @@ class ControlBot:
             self.states.pop(uid, None)
             await m.reply(f"🏪 Настройки автозакупки телефонов — <b>{acc.get('name')}</b>",
                           reply_markup=self._phone_shop_settings_menu(acc))
+            return
+        elif field == "autopay_percent":
+            if not val.isdigit() or not (1 <= int(val) <= 100):
+                await m.reply("Нужно число от 1 до 100 (%). Ещё раз:")
+                return
+            acc[field] = int(val)
+            self.storage.save()
+            self.states.pop(uid, None)
+            await m.reply(f"⚙️ Автоматизация — <b>{acc.get('name')}</b>",
+                          reply_markup=self._automation_menu(acc))
             return
         elif field == "mining_time":
             mt = re.match(r"^\s*(\d{1,2})[:.\s](\d{1,2})\s*$", val)
