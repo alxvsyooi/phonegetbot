@@ -27,13 +27,23 @@ ROULETTE_BOT = "phonegetroulettebot"
 CARD_WORD = "Ткарточка"
 ROULETTE_WORD = "Рулетка"
 ROULETTE_BUTTON = "Крутить"
-MINING_WORD = "Тмайнинг"
-MINING_BUTTON = "Снять деньги с фермы"
+MINING_WORD = "Тмайнинг"            # открывает модульную ферму (Rack/PSU/Cooling/слоты)
+FARM_WITHDRAW_BUTTON = "Снять P-Coins с фермы"
+FARM_REMOVE_BUTTON = "Убрать телефон"
+FARM_BROKEN_MARKER = "сломано"
 BALANCE_WORD = "такк"               # профиль: «Точки: N», «Телефонов в коллекции: N»
 PAY_CONFIRM_BUTTON = "Подтвердить"
 CONTAINER_WORD = "Магазин контейнеров"
 DAILY_REWARD_WORD = "Ежедневная награда"
 DAILY_REWARD_BUTTON = "Забрать"
+UPGRADE_WORD = "Магазин улучшений"   # 7 категорий, все 6-уровневые (перезарядка/шансы/ферма/лимит)
+UPGRADE_CATEGORIES = [
+    "Перезарядка", "Шансы выпадения", "Шансы апгрейда",
+    "Стойка фермы", "Охлаждение фермы", "Блок питания фермы", "Лимит покупок",
+]
+UPGRADE_MAX_MARKER = "максимальный уровень"
+UPGRADE_BUY_BUTTON = "Улучшить за"
+UPGRADE_RESERVE = 2_000_000          # неприкосновенный запас ТОчек (не тратить ниже него)
 
 # дефолтное время майнинга по МСК (UTC+3)
 MINING_HOUR = 1

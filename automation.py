@@ -90,6 +90,7 @@ class _WorkerBase:
         self.last_self_cmd = "—"
         self.last_shop = "—"
         self.last_repair = "—"
+        self.last_upgrade = "—"
         self.last_accept = "—"
 
     # ---------- свойства ----------

@@ -17,9 +17,10 @@ from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from storage import (
     CARDS_BOT, ROULETTE_BOT,
     CARD_WORD, ROULETTE_WORD, ROULETTE_BUTTON,
-    MINING_WORD, MINING_BUTTON,
+    MINING_WORD, FARM_WITHDRAW_BUTTON, FARM_REMOVE_BUTTON, FARM_BROKEN_MARKER,
     BALANCE_WORD, PAY_CONFIRM_BUTTON, CONTAINER_WORD,
     DAILY_REWARD_WORD, DAILY_REWARD_BUTTON,
+    UPGRADE_WORD, UPGRADE_CATEGORIES, UPGRADE_MAX_MARKER, UPGRADE_BUY_BUTTON, UPGRADE_RESERVE,
 )
 from common import MSK, parse_hhmm, seconds_until_msk, fmt_duration, clock, today_msk
 
@@ -42,6 +43,38 @@ _SHOP_TIME_RE = re.compile(
 # редкая гонка при параллельных запросах к одному боту), «дн.» в тексте выдаёт чужой
 # формат, и парсить его как обычный кулдаун карточки нельзя
 _DAY_HINT_RE = re.compile(r"\d+\s*дн", re.IGNORECASE)
+
+# ---------- модульная ферма (майнинг): «N. Модель», «N. Пусто», «N. ... СЛОМАНО» ----------
+_FARM_SLOT_RE = re.compile(r"^(\d+)\.\s*(.+)$", re.MULTILINE)
+_FARM_BALANCE_RE = re.compile(r"Баланс:\s*([\d.]+)\s*/\s*(\d+)\s*P-Coins", re.IGNORECASE)
+FARM_CHECK_INTERVAL = 300  # раз в 5 минут проверяем ферму на сломанные телефоны
+
+
+def parse_farm_slots(text: str | None) -> dict[int, dict]:
+    """Слоты модульной фермы из ответа на «Тмайнинг»: номер -> {status, model}.
+    status: "empty" | "broken" | "working"."""
+    if not text:
+        return {}
+    slots: dict[int, dict] = {}
+    for m in _FARM_SLOT_RE.finditer(text):
+        num = int(m.group(1))
+        rest = m.group(2).strip()
+        low = rest.lower()
+        if "пусто" in low:
+            slots[num] = {"status": "empty"}
+        elif FARM_BROKEN_MARKER in low:
+            model = re.sub(rf"[^\w]*{FARM_BROKEN_MARKER}[^\w]*", "", rest, flags=re.IGNORECASE).strip()
+            slots[num] = {"status": "broken", "model": model or rest}
+        else:
+            slots[num] = {"status": "working", "model": rest}
+    return slots
+
+
+def parse_farm_balance(text: str | None) -> tuple[float, int] | None:
+    if not text:
+        return None
+    m = _FARM_BALANCE_RE.search(text)
+    return (float(m.group(1)), int(m.group(2))) if m else None
 
 
 def parse_cooldown(text: str | None) -> int | None:
@@ -116,6 +149,24 @@ def parse_unit_price(text: str | None) -> int | None:
     if not text:
         return None
     m = _UNIT_PRICE_RE.search(text)
+    if not m:
+        return None
+    digits = re.sub(r"\D", "", m.group(1))
+    return int(digits) if digits else None
+
+
+# "Улучшить за 10,000" (кнопка «Магазина улучшений»)
+_UPGRADE_COST_RE = re.compile(r"улучшить\s+за\s*([\d\s.,]+)", re.IGNORECASE)
+
+
+def _fmt_points(n: int) -> str:
+    return f"{n:,}".replace(",", " ")
+
+
+def parse_upgrade_cost(button_text: str | None) -> int | None:
+    if not button_text:
+        return None
+    m = _UPGRADE_COST_RE.search(button_text)
     if not m:
         return None
     digits = re.sub(r"\D", "", m.group(1))
@@ -224,7 +275,7 @@ class FarmModule:
     def _loops(self):
         return super()._loops() + [
             self._card_loop(), self._roulette_loop(),
-            self._mining_loop(), self._container_loop(),
+            self._mining_loop(), self._container_loop(), self._farm_watch_loop(),
         ]
 
     def _farm_active(self) -> bool:
@@ -654,6 +705,89 @@ class FarmModule:
         if collection is not None:
             lines.append(f"📱 Телефонов в коллекции: {collection}")
         return "\n".join(lines)
+
+    async def upgrade_account(self) -> str:
+        """💰 Прокачка аккаунта: проходит по всем 7 категориям «Магазина улучшений»
+        (Перезарядка, Шансы выпадения, Шансы апгрейда, Стойка/Охлаждение/Питание
+        фермы, Лимит покупок) и в каждой жмёт «Улучшить за N», пока не упрётся в
+        максимальный уровень (все категории 6-уровневые) или пока баланса не хватит
+        с учётом неприкосновенного запаса UPGRADE_RESERVE (по требованию владельца —
+        никогда не тратить баланс ниже этого запаса). Баланс проверяется перед
+        КАЖДОЙ покупкой отдельным запросом («такк»), а не один раз в начале — после
+        каждого улучшения он меняется. Используется кнопкой «💰 Прокачать аккаунт»."""
+        if not self.client or not self.running:
+            self.last_upgrade = "аккаунт не запущен"
+            return self.last_upgrade
+        if self._trade_mode:
+            self.last_upgrade = "идёт трейд — попробуй чуть позже"
+            return self.last_upgrade
+
+        root = await self._send_and_wait(CARDS_BOT, UPGRADE_WORD, timeout=15)
+        if root is None:
+            self.last_upgrade = f"⚠️ нет ответа на «{UPGRADE_WORD}» ({clock()})"
+            return self.last_upgrade
+
+        lines: list[str] = []
+        any_upgraded = False
+        for label in UPGRADE_CATEGORIES:
+            btn = _find_button(root, label)
+            if not btn:
+                lines.append(f"• {label}: кнопка не найдена")
+                continue
+            clicked, cur = await self._click_and_wait(root, btn, CARDS_BOT, timeout=15)
+            if not clicked or cur is None:
+                lines.append(f"• {label}: нет ответа")
+                continue
+
+            level_ups, spent, stop_reason = 0, 0, None
+            while True:
+                dtext = getattr(cur, "text", None) or getattr(cur, "caption", None) or ""
+                if UPGRADE_MAX_MARKER in dtext.lower():
+                    break
+                buy_btn = _find_button(cur, UPGRADE_BUY_BUTTON)
+                if not buy_btn:
+                    stop_reason = "неизвестный формат ответа, стоп"
+                    break
+                cost = parse_upgrade_cost(buy_btn)
+                balance = await self._check_balance()
+                if cost is None or balance is None:
+                    stop_reason = "не смог разобрать цену/баланс, стоп"
+                    break
+                if balance - cost < UPGRADE_RESERVE:
+                    stop_reason = (
+                        f"не хватает баланса с запасом (цена {_fmt_points(cost)}, запас "
+                        f"{_fmt_points(UPGRADE_RESERVE)}, баланс {_fmt_points(balance)})")
+                    break
+                clicked2, cur2 = await self._click_and_wait(cur, buy_btn, CARDS_BOT, timeout=15)
+                if not clicked2 or cur2 is None:
+                    stop_reason = f"клик «{buy_btn}» не дал ответа, стоп"
+                    break
+                level_ups += 1
+                spent += cost
+                any_upgraded = True
+                cur = cur2
+
+            if level_ups:
+                summary = f"+{level_ups} ур. (потрачено {_fmt_points(spent)} ТОчек)"
+                if stop_reason:
+                    summary += f" — {stop_reason}"
+                lines.append(f"• {label}: {summary}")
+            elif stop_reason:
+                lines.append(f"• {label}: {stop_reason}")
+            else:
+                lines.append(f"• {label}: уже максимум")
+
+            back_btn = _find_button(cur, "назад")
+            if back_btn:
+                clicked3, back_msg = await self._click_and_wait(cur, back_btn, CARDS_BOT, timeout=15)
+                if clicked3 and back_msg is not None:
+                    root = back_msg
+
+        self.last_upgrade = (
+            (f"✅ прокачано ({clock()}):\n" + "\n".join(lines)) if any_upgraded
+            else f"✅ всё уже на максимуме ({clock()})"
+        )
+        return self.last_upgrade
 
     async def _buy_category(
         self, bot: str, shop_msg, category_label: str, cfg: dict, balance: int | None,

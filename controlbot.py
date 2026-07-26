@@ -284,6 +284,7 @@ class ControlBot:
             [_btn("🧾 Такс (баланс)", f"taxx:{aid}")],
             [_btn("🛠 Почистить нерабочие сейчас", f"repairnow:{aid}")],
             [_btn("🏪 Купить телефоны сейчас", f"shopnow:{aid}")],
+            [_btn("💰 Прокачать аккаунт", f"upgradeacc:{aid}")],
             [_btn("💸 Перевести человеку", f"paystart:{aid}")],
             [_btn("🤝 Трейд с человеком", f"tradestart:{aid}")],
         ]
@@ -590,6 +591,8 @@ class ControlBot:
                 await self._start_repair_now(q, aid)
             elif data.startswith("shopnow:"):
                 await self._start_shop_now(q, aid)
+            elif data.startswith("upgradeacc:"):
+                await self._start_upgrade_account(q, aid)
             elif data.startswith("capgo:"):
                 cat = data.split(":")[2]
                 w = self.manager.workers.get(aid)
@@ -865,6 +868,18 @@ class ControlBot:
         result = await w.buy_phones_now()
         acc = self.storage.get(aid)
         await self._safe_edit(q, self._account_text(acc) + f"\n\n🏪 {result}", self._account_menu(acc))
+
+    async def _start_upgrade_account(self, q: CallbackQuery, aid: int) -> None:
+        w = self.manager.workers.get(aid)
+        if not w or not w.running:
+            return await q.answer("Аккаунт не запущен", show_alert=True)
+        await q.answer("⏳ Прокачиваю аккаунт (магазин улучшений)...")
+        asyncio.create_task(self._run_upgrade_account(q, aid, w))
+
+    async def _run_upgrade_account(self, q: CallbackQuery, aid: int, w) -> None:
+        result = await w.upgrade_account()
+        acc = self.storage.get(aid)
+        await self._safe_edit(q, self._account_text(acc) + f"\n\n💰 {result}", self._actions_menu(acc))
 
     async def _run_broadcast(self, q: CallbackQuery, uid: int, text: str) -> None:
         owners = {a.get("owner_id") for a in self.storage.accounts if a.get("owner_id")}
