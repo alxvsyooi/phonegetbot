@@ -275,7 +275,7 @@ class FarmModule:
     def _loops(self):
         return super()._loops() + [
             self._card_loop(), self._roulette_loop(),
-            self._mining_loop(), self._container_loop(), self._farm_watch_loop(),
+            self._mining_loop(), self._container_loop(),
         ]
 
     def _farm_active(self) -> bool:
