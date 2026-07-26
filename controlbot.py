@@ -124,18 +124,28 @@ class ControlBot:
     def _account_menu(self, acc: dict) -> InlineKeyboardMarkup:
         aid = acc["id"]
         en = acc.get("enabled", True)
-        al = "вкл ✅" if acc.get("alerts_enabled", True) else "выкл ❌"
         rows = [
             [_btn("⏸ Выключить" if en else "▶️ Включить", f"toggle:{aid}")],
             [_btn("📱 Фарм карточек", f"farm:{aid}"), _btn("📨 Автоотправка", f"autosend:{aid}")],
-            [_btn(f"🔔 Алерты: {al}", f"talerts:{aid}")],
+            [_btn("⚙️ Настройки", f"settings:{aid}")],
+            [_btn("🔄 Обновить", f"acc:{aid}"), _btn("⬅️ Назад", "list")],
         ]
+        return InlineKeyboardMarkup(rows)
+
+    # ---------- ⚙️ Настройки аккаунта (алерты/акк/имя/удаление) ----------
+    def _settings_text(self, acc: dict) -> str:
+        return f"⚙️ <b>Настройки</b> — {acc.get('name')}"
+
+    def _settings_menu(self, acc: dict) -> InlineKeyboardMarkup:
+        aid = acc["id"]
+        al = "вкл ✅" if acc.get("alerts_enabled", True) else "выкл ❌"
+        rows = [[_btn(f"🔔 Алерты: {al}", f"talerts:{aid}")]]
         if acc.get("owner_id") in self.admin_ids:
             n = len(acc.get("msg_log", []))
             rows.append([_btn(f"📩 Акк ({n})" if n else "📩 Акк", f"msgacc:{aid}")])
         rows += [
             [_btn("✏️ Имя", f"rename:{aid}"), _btn("🗑 Удалить", f"del:{aid}")],
-            [_btn("🔄 Обновить", f"acc:{aid}"), _btn("⬅️ Назад", "list")],
+            [_btn("⬅️ Назад", f"acc:{aid}")],
         ]
         return InlineKeyboardMarkup(rows)
 
@@ -160,7 +170,7 @@ class ControlBot:
         return InlineKeyboardMarkup([
             [_btn(f"🔔 Улавливать: {ma}", f"tmsgacc:{aid}")],
             [_btn("🔄 Обновить", f"msgacc:{aid}"), _btn("🗑 Очистить историю", f"clrmsgacc:{aid}")],
-            [_btn("⬅️ Назад", f"acc:{aid}")],
+            [_btn("⬅️ Назад", f"settings:{aid}")],
         ])
 
     # ---------- 🌾 Фарм карточек (независимый модуль) ----------
@@ -457,8 +467,10 @@ class ControlBot:
                                           reply_markup=self._targets_menu(acc))
             elif data.startswith("toggle:"):
                 await self._toggle(q, acc, "enabled", redisplay="account")
+            elif data.startswith("settings:"):
+                await q.message.edit_text(self._settings_text(acc), reply_markup=self._settings_menu(acc))
             elif data.startswith("talerts:"):
-                await self._toggle(q, acc, "alerts_enabled", redisplay="account")
+                await self._toggle(q, acc, "alerts_enabled", redisplay="settings")
             elif data.startswith("msgacc:"):
                 if acc.get("owner_id") not in self.admin_ids:
                     return await q.answer("Доступно только для аккаунтов создателя", show_alert=True)
@@ -607,7 +619,7 @@ class ControlBot:
                 await q.message.edit_text(
                     "Точно удалить аккаунт?",
                     reply_markup=InlineKeyboardMarkup([[
-                        _btn("✅ Да", f"delyes:{aid}"), _btn("❌ Нет", f"acc:{aid}")]]))
+                        _btn("✅ Да", f"delyes:{aid}"), _btn("❌ Нет", f"settings:{aid}")]]))
             elif data.startswith("delyes:"):
                 await self.manager.stop_account(aid)
                 self.storage.remove(aid)
@@ -687,6 +699,8 @@ class ControlBot:
             await q.message.edit_text(self._autosend_text(acc), reply_markup=self._autosend_menu(acc))
         elif redisplay == "msgacc":
             await q.message.edit_text(self._msgacc_text(acc), reply_markup=self._msgacc_menu(acc))
+        elif redisplay == "settings":
+            await q.message.edit_text(self._settings_text(acc), reply_markup=self._settings_menu(acc))
         else:  # "automation" — фарм-подтумблеры (карточки/рулетка/майнинг/…)
             await q.message.edit_text(f"⚙️ Автоматизация — <b>{acc.get('name')}</b>",
                                       reply_markup=self._automation_menu(acc))
