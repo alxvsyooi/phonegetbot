@@ -16,7 +16,7 @@ from pyrogram.types import (
     ReplyKeyboardMarkup, KeyboardButton,
 )
 from pyrogram.errors import (
-    SessionPasswordNeeded, PhoneCodeInvalid, PhoneCodeExpired, FloodWait,
+    SessionPasswordNeeded, PhoneCodeInvalid, PhoneCodeExpired, FloodWait, MessageNotModified,
 )
 
 from manager import Manager
@@ -639,6 +639,14 @@ class ControlBot:
                 await q.message.edit_text(f"🧩 Задачи — <b>{acc.get('name')}</b>",
                                           reply_markup=self._tasks_menu(acc))
             await q.answer()
+        except MessageNotModified:
+            # содержимое (текст+клавиатура) не изменилось с прошлого раза — не ошибка
+            # пользователя, просто нечего перерисовывать (например, «Обновить» без
+            # новых данных)
+            try:
+                await q.answer()
+            except Exception:
+                pass
         except Exception as e:  # noqa: BLE001
             try:
                 await q.answer(f"Ошибка: {e}", show_alert=True)
@@ -851,6 +859,8 @@ class ControlBot:
     async def _safe_edit(self, q: CallbackQuery, text: str, markup) -> None:
         try:
             await q.message.edit_text(text, reply_markup=markup)
+        except MessageNotModified:
+            pass  # содержимое не изменилось — нечего перерисовывать, это не ошибка
         except Exception:
             try:
                 await q.message.reply(text)
