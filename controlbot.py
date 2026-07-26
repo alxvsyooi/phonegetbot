@@ -280,7 +280,6 @@ class ControlBot:
         rows = [
             [_btn("⛏ Собрать майнинг сейчас", f"mine:{aid}")],
             [_btn("🔄 Слить телефоны (по 🎯 получателю трейда)", f"exch:{aid}")],
-            [_btn("📦 Проверить магазин контейнеров", f"checkcont:{aid}")],
             [_btn("🧾 Такс (баланс)", f"taxx:{aid}")],
             [_btn("🛠 Почистить нерабочие сейчас", f"repairnow:{aid}")],
             [_btn("🏪 Купить телефоны сейчас", f"shopnow:{aid}")],
@@ -549,8 +548,6 @@ class ControlBot:
                 await self._start_payout_all(q, aid)
             elif data.startswith("taxx:"):
                 await self._start_show_balance(q, aid)
-            elif data.startswith("checkcont:"):
-                await self._check_containers(q, aid)
             elif data.startswith("paystart:"):
                 self.states[uid] = {"flow": "manualpay", "acc_id": aid, "step": "target"}
                 await q.message.edit_text(
@@ -725,19 +722,6 @@ class ControlBot:
         await w.collect_mining()
         acc = self.storage.get(aid)
         await self._safe_edit(q, self._account_text(acc) + f"\n\n⛏ {w.last_mining}",
-                              self._account_menu(acc))
-
-    async def _check_containers(self, q: CallbackQuery, aid: int) -> None:
-        w = self.manager.workers.get(aid)
-        if not w or not w.running:
-            return await q.answer("Аккаунт не запущен", show_alert=True)
-        await q.answer("⏳ Проверяю магазин...")
-        asyncio.create_task(self._run_check_containers(q, aid, w))
-
-    async def _run_check_containers(self, q: CallbackQuery, aid: int, w) -> None:
-        await w.check_containers()
-        acc = self.storage.get(aid)
-        await self._safe_edit(q, self._account_text(acc) + f"\n\n📦 {w.last_container}",
                               self._account_menu(acc))
 
     async def _run_resume_containers(self, q: CallbackQuery, aid: int, w, cat: str) -> None:
