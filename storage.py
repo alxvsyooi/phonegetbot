@@ -30,7 +30,7 @@ ROULETTE_BUTTON = "Крутить"
 MINING_WORD = "Тмайнинг"            # открывает модульную ферму (Rack/PSU/Cooling/слоты)
 FARM_WITHDRAW_BUTTON = "Снять P-Coins с фермы"
 FARM_REMOVE_BUTTON = "Убрать телефон"
-FARM_BROKEN_MARKER = "сломано"
+FARM_BROKEN_MARKER = "сломан"       # реальный текст бота — «(СЛОМАН)» (было "сломано" — не совпадало)
 BALANCE_WORD = "такк"               # профиль: «Точки: N», «Телефонов в коллекции: N»
 PAY_CONFIRM_BUTTON = "Подтвердить"
 CONTAINER_WORD = "Магазин контейнеров"
@@ -154,6 +154,18 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "retry_interval": 5,        # пауза перед повтором клика, если бот принял его, но не ответил
         "retry_attempts": 3,        # сколько раз повторять один и тот же клик перед тем, как сдаться
     },
+    "farm_maintenance": {
+        "bot": "phonegetcardsbot",
+        "mining_command": "Тмайнинг",       # открывает модульную ферму (та же команда, что MINING_WORD)
+        "slot_button_prefix": "Слот",       # кнопки «Слот 1».."Слот 12"
+        "extract_button": "извлечь сломанный",   # на карточке слота со статусом СЛОМАН
+        "add_phone_button": "добавить телефон",  # на карточке пустого слота
+        "next_page_button": "➡",            # пагинация в списке телефонов по редкости
+        "check_interval": 14400,   # раз в 4 часа: снять сломанные -> они уйдут на автопочинку (repair.py) ->
+                                    # уже отремонтированные той же модели вернуть в опустевший слот
+        "retry_interval": 5,       # пауза перед повтором клика, если бот принял его, но не ответил
+        "retry_attempts": 3,       # сколько раз повторять один и тот же клик перед тем, как сдаться
+    },
 }
 
 # поля по умолчанию для нового аккаунта
@@ -192,13 +204,18 @@ ACCOUNT_DEFAULTS: dict[str, Any] = {
     "phone_shop_quantity": 0,      # 0 = максимум предложенного (в рамках баланса), иначе конкретное число
     "auto_repair_enabled": False,  # 🛠 автопочинка своих нерабочих телефонов (только своим оборудованием)
     "auto_accept_enabled": False,  # 📥 автопринятие чужих заказов на ремонт (тихие часы — settings.repair)
+    "farm_maintenance_enabled": False,  # 🔧 обслуживание фермы: снять сломанные (-> автопочинка) -> вернуть починенные в слот
+    # ПРИМЕЧАНИЕ: farm_slot_models (номер слота -> модель) НЕ здесь — это dict, а значения
+    # ACCOUNT_DEFAULTS копируются по ССЫЛКЕ при миграции (Storage.__init__/add), общий
+    # мутируемый dict на все аккаунты был бы багом. farm.py заводит его лениво через
+    # self.account.setdefault("farm_slot_models", {}) при первом использовании.
 }
 
 
 def _empty_stats() -> dict[str, int]:
     return {"phones": 0, "good_phones": 0, "roulette": 0, "mining": 0, "paid": 0,
             "exchanged": 0, "daily": 0, "containers_bought": 0, "shop_bought": 0,
-            "repaired": 0, "accepted_orders": 0}
+            "repaired": 0, "accepted_orders": 0, "farm_extracted": 0, "farm_reinstalled": 0}
 
 
 def _read_json(path: str, default):

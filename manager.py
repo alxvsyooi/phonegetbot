@@ -29,6 +29,7 @@ class Manager:
         self_commands_cfg: dict | None = None,
         shop_cfg: dict | None = None,
         repair_cfg: dict | None = None,
+        farm_maintenance_cfg: dict | None = None,
     ) -> None:
         self.storage = storage
         self.good_keywords = good_keywords or []
@@ -38,6 +39,7 @@ class Manager:
         self.self_commands_cfg = self_commands_cfg or {}
         self.shop_cfg = shop_cfg or {}
         self.repair_cfg = repair_cfg or {}
+        self.farm_maintenance_cfg = farm_maintenance_cfg or {}
         self.workers: dict[int, AccountWorker] = {}
         self._trade_locks: dict[int, asyncio.Lock] = {}  # acc_id -> лок (см. run_trade)
         # выставляется в main.py ПОСЛЕ создания ControlBot: даёт воркерам возможность
@@ -72,6 +74,7 @@ class Manager:
             self_commands_cfg=self.self_commands_cfg,
             shop_cfg=self.shop_cfg,
             repair_cfg=self.repair_cfg,
+            farm_maintenance_cfg=self.farm_maintenance_cfg,
         )
         worker.trade_runner = self.run_trade
         worker.alert_fn = self.send_alert

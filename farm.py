@@ -203,6 +203,29 @@ def _find_button(message, substr: str) -> str | None:
     return None
 
 
+def _msg_text(message) -> str:
+    if message is None:
+        return ""
+    return getattr(message, "text", None) or getattr(message, "caption", None) or ""
+
+
+def _exact_button(message, target: str) -> str | None:
+    """Как _find_button, но ТОЧНОЕ совпадение текста кнопки (без учёта регистра) —
+    нужно для «Слот N»: подстрочный поиск для N=1 мог бы случайно словить
+    «Слот 10»/«Слот 11»/«Слот 12» (та же проблема, что уже чинили в _numeric_button)."""
+    t_norm = target.strip().lower()
+    for t in _all_buttons(message):
+        if t.strip().lower() == t_norm:
+            return t
+    return None
+
+
+# редкости телефонов, как называются кнопки в «Мои телефоны» / «Добавить телефон»
+_RARITY_LABELS = [
+    "Ширпотреб", "Необычный", "Редкий", "Мистический", "Хроматический", "Аркана", "Платиновый",
+]
+
+
 _CATEGORY_KEYWORDS = {"donation": "донат", "expensive": "дорог", "budget": "бюджет"}
 _CATEGORY_EMOJI = {"donation": "🎁", "expensive": "💎", "budget": "💰"}
 _CATEGORY_QTY_FIELD = {
@@ -276,6 +299,7 @@ class FarmModule:
         return super()._loops() + [
             self._card_loop(), self._roulette_loop(),
             self._mining_loop(), self._container_loop(),
+            self._farm_maintenance_loop(),
         ]
 
     def _farm_active(self) -> bool:
@@ -1021,7 +1045,7 @@ class FarmModule:
             return False
         try:
             reply = await self._send_and_wait(CARDS_BOT, MINING_WORD)
-            clicked = await self._try_click(reply, MINING_BUTTON)
+            clicked = await self._try_click(reply, FARM_WITHDRAW_BUTTON)
             if clicked:
                 self._bump("mining")
                 self.last_mining = f"💰 снято с фермы ({clock()} {today_msk()})"
@@ -1057,6 +1081,215 @@ class FarmModule:
         except Exception as e:  # noqa: BLE001
             self.last_daily = f"ошибка: {e}"
             return False
+
+    # ---------- обслуживание модульной фермы (снять сломанные -> автопочинка -> вернуть) ----------
+    def _farm_maintenance_active(self) -> bool:
+        return self._farm_active() and self.account.get("farm_maintenance_enabled", False)
+
+    async def _farm_maintenance_loop(self) -> None:
+        """Раз в farm_maintenance.check_interval (по умолчанию 4 часа) вызывает
+        farm_maintenance_now(). Сам ремонт извлечённых телефонов делает НЕ этот
+        цикл, а auto_repair_loop (repair.py) — он и так регулярно проверяет «Мои
+        телефоны -> Нерабочие» и чинит своим оборудованием, если тумблер
+        auto_repair_enabled включён у этого же аккаунта."""
+        while self.running:
+            try:
+                if self._trade_mode or not self._farm_maintenance_active():
+                    await asyncio.sleep(30)
+                    continue
+                now = time.time()
+                if now < self.farm_maintenance_next_ts:
+                    await asyncio.sleep(min(60, self.farm_maintenance_next_ts - now))
+                    continue
+                await self.farm_maintenance_now()
+                interval = max(300, int(self.farm_maintenance_cfg.get("check_interval", 14400)))
+                self.farm_maintenance_next_ts = time.time() + interval
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                self.last_farm_maintenance = f"ошибка: {e}"
+                self.farm_maintenance_next_ts = time.time() + 300
+                await asyncio.sleep(5)
+
+    async def farm_maintenance_now(self) -> str:
+        """Обслуживание фермы: для каждого слота со статусом СЛОМАН — «Слот N» ->
+        «Извлечь сломанный» (телефон уходит в «Мои телефоны -> Нерабочие», дальше
+        его подхватит автопочинка). Для каждого пустого слота, чья модель до этого
+        была запомнена (account.farm_slot_models) — «Слот N» -> «Добавить телефон»
+        -> перебор редкостей -> модель по имени -> установка, если рабочий
+        экземпляр этой модели уже найден в инвентаре (т.е. ремонт уже завершился).
+
+        Между шагами команда «Тмайнинг» отправляется заново (не идёт «назад» по
+        уже открытым меню) — так же, как _buy_containers() между категориями:
+        меньше риска зависнуть на устаревшем сообщении, если бот отредактировал
+        его иначе, чем ожидалось. Используется циклом и кнопкой в меню."""
+        if not self.client or not self.running:
+            self.last_farm_maintenance = "аккаунт не запущен"
+            return self.last_farm_maintenance
+        if self._trade_mode:
+            self.last_farm_maintenance = "идёт трейд — попробуй чуть позже"
+            return self.last_farm_maintenance
+        cfg = self.farm_maintenance_cfg
+        bot = cfg.get("bot") or CARDS_BOT
+        mining_cmd = cfg.get("mining_command") or MINING_WORD
+        try:
+            root = await self._send_and_wait(bot, mining_cmd, timeout=20)
+            if root is None:
+                self.last_farm_maintenance = f"⚠️ нет ответа на «{mining_cmd}» ({clock()})"
+                return self.last_farm_maintenance
+            slots = parse_farm_slots(_msg_text(root))
+            if not slots:
+                self.last_farm_maintenance = f"⚠️ не разобрал слоты фермы ({clock()})"
+                return self.last_farm_maintenance
+
+            slot_models = self.account.setdefault("farm_slot_models", {})
+            for num, info in slots.items():
+                if info.get("model"):
+                    slot_models[str(num)] = info["model"]
+
+            extracted: list[str] = []
+            for num in sorted(n for n, i in slots.items() if i["status"] == "broken"):
+                fresh = await self._send_and_wait(bot, mining_cmd, timeout=20)
+                if fresh is None:
+                    break
+                ok, model = await self._extract_broken_slot(bot, fresh, num, cfg)
+                if ok:
+                    self._bump("farm_extracted")
+                    extracted.append(f"№{num} «{model or '?'}»")
+
+            fresh = await self._send_and_wait(bot, mining_cmd, timeout=20)
+            empty_nums = (
+                sorted(n for n, i in parse_farm_slots(_msg_text(fresh)).items() if i["status"] == "empty")
+                if fresh is not None else []
+            )
+
+            reinstalled: list[str] = []
+            for num in empty_nums:
+                expected = slot_models.get(str(num))
+                if not expected:
+                    continue  # не знаем, какая модель тут стояла — не гадаем
+                fresh = await self._send_and_wait(bot, mining_cmd, timeout=20)
+                if fresh is None:
+                    break
+                ok = await self._reinstall_phone_slot(bot, fresh, num, expected, cfg)
+                if ok:
+                    self._bump("farm_reinstalled")
+                    reinstalled.append(f"№{num} «{expected}»")
+
+            if self.storage:
+                try:
+                    self.storage.save()
+                except Exception:
+                    pass
+
+            parts = []
+            if extracted:
+                parts.append("извлечены (ушли на автопочинку): " + ", ".join(extracted))
+            if reinstalled:
+                parts.append("возвращены в ферму: " + ", ".join(reinstalled))
+            if not parts:
+                parts.append("сломанных слотов нет, возвращать пока нечего")
+            self.last_farm_maintenance = f"🔧 {'; '.join(parts)} ({clock()} {today_msk()})"
+            return self.last_farm_maintenance
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            self.last_farm_maintenance = f"ошибка: {e}"
+            return self.last_farm_maintenance
+
+    async def _click_exact_step(self, bot: str, msg, exact_text: str, cfg: dict, timeout: int = 15):
+        """Как _click_step, но клик СТРОГО по уже разрешённому exact_text (без
+        повторного подстрочного поиска) — для «Слот N», где подстрока небезопасна."""
+        retry_interval = max(3, int(cfg.get("retry_interval", 10)))
+        attempts = max(1, int(cfg.get("retry_attempts", 3)))
+        clicked = False
+        for i in range(attempts):
+            clicked, result = await self._click_and_wait(msg, exact_text, bot, timeout=timeout)
+            if not clicked:
+                return None
+            if result is not None:
+                return result
+            if i < attempts - 1:
+                await asyncio.sleep(retry_interval)
+        return None
+
+    async def _extract_broken_slot(self, bot: str, root, num: int, cfg: dict) -> tuple[bool, str | None]:
+        """Слот N (сломан) -> карточка -> «Извлечь сломанный». Возвращает
+        (успех, модель телефона, который был в слоте)."""
+        prefix = cfg.get("slot_button_prefix", "Слот")
+        slot_btn = _exact_button(root, f"{prefix} {num}")
+        if not slot_btn:
+            return False, None
+        card = await self._click_exact_step(bot, root, slot_btn, cfg, timeout=15)
+        if card is None:
+            return False, None
+        model_m = re.search(r"Телефон:\s*(.+)", _msg_text(card))
+        model = model_m.group(1).strip() if model_m else None
+        extract_btn = _find_button(card, cfg.get("extract_button", "извлечь сломанный"))
+        if not extract_btn:
+            return False, model
+        after = await self._click_step(bot, card, extract_btn, cfg, timeout=15)
+        return after is not None, model
+
+    async def _find_phone_button_across_pages(
+        self, bot: str, msg, model_name: str, cfg: dict, max_pages: int = 6,
+    ) -> tuple[str | None, object]:
+        """В постраничном списке телефонов одной редкости ищет кнопку модели
+        model_name (кнопка вида «Модель (xN)» — суффикс количества отбрасывается
+        при сравнении). Возвращает (текст_кнопки, сообщение_с_этой_страницей)."""
+        low_model = model_name.strip().lower()
+        current = msg
+        for _ in range(max_pages):
+            for t in _all_buttons(current):
+                name_part = re.sub(r"\s*\(x?\d+\)\s*$", "", t.strip(), flags=re.IGNORECASE).strip()
+                if name_part.lower() == low_model:
+                    return t, current
+            next_btn = _find_button(current, cfg.get("next_page_button", "➡"))
+            if not next_btn:
+                break
+            nxt = await self._click_step(bot, current, next_btn, cfg, timeout=15)
+            if nxt is None:
+                break
+            current = nxt
+        return None, current
+
+    async def _reinstall_phone_slot(self, bot: str, root, num: int, model_name: str, cfg: dict) -> bool:
+        """Пустой слот N -> «Добавить телефон» -> перебор редкостей -> найти
+        рабочий экземпляр model_name (значит, ремонт уже завершился) -> установить.
+        Если модель нигде не найдена (ремонт ещё не закончен) — просто пропускает
+        слот, следующий проход цикла попробует снова."""
+        prefix = cfg.get("slot_button_prefix", "Слот")
+        slot_btn = _exact_button(root, f"{prefix} {num}")
+        if not slot_btn:
+            return False
+        card = await self._click_exact_step(bot, root, slot_btn, cfg, timeout=15)
+        if card is None:
+            return False
+        add_btn = _find_button(card, cfg.get("add_phone_button", "добавить телефон"))
+        if not add_btn:
+            return False
+        rarity_msg = await self._click_step(bot, card, add_btn, cfg, timeout=15)
+        if rarity_msg is None:
+            return False
+
+        for rarity_label in _RARITY_LABELS:
+            cat_btn = _find_button(rarity_msg, rarity_label)
+            if not cat_btn:
+                continue
+            cat_msg = await self._click_step(bot, rarity_msg, cat_btn, cfg, timeout=15)
+            if cat_msg is None:
+                continue
+            phone_btn, page_msg = await self._find_phone_button_across_pages(bot, cat_msg, model_name, cfg)
+            if not phone_btn:
+                continue
+            installed = await self._click_step(bot, page_msg, phone_btn, cfg, timeout=15)
+            if installed is None:
+                return False
+            confirm_btn = _find_button(installed, "подтвердить")
+            if confirm_btn:
+                await self._click_step(bot, installed, confirm_btn, cfg, timeout=15)
+            return True
+        return False  # рабочего экземпляра этой модели пока нет (ремонт не завершён)
 
     async def _payout(self) -> None:
         """«такк» -> «Точки: N» -> /pay <получатель> N*процент -> Подтвердить.

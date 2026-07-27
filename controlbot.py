@@ -236,6 +236,8 @@ class ControlBot:
                   f"tcaprelay:{aid}")],
             [_btn(f"🛠 Автопочинка своих телефонов: {s('auto_repair_enabled', False)}", f"trepair:{aid}")],
             [_btn(f"📥 Автопринятие чужих заказов: {s('auto_accept_enabled', False)}", f"taccept:{aid}")],
+            [_btn(f"🔧 Обслуживание фермы (снять/починить/вернуть): {s('farm_maintenance_enabled', False)}",
+                  f"tfarmmaint:{aid}")],
             [_btn(f"🏪 Автозакупка телефонов: {s('phone_shop_enabled', False)}", f"tshop:{aid}")],
             [_btn("🏪 Настройки автозакупки телефонов →", f"phoneshop:{aid}")],
             [_btn("⬅️ Назад", f"farm:{aid}")],
@@ -282,6 +284,7 @@ class ControlBot:
             [_btn("🔄 Слить телефоны (по 🎯 получателю трейда)", f"exch:{aid}")],
             [_btn("🧾 Такс (баланс)", f"taxx:{aid}")],
             [_btn("🛠 Почистить нерабочие сейчас", f"repairnow:{aid}")],
+            [_btn("🔧 Обслужить ферму сейчас", f"farmmaintnow:{aid}")],
             [_btn("🏪 Купить телефоны сейчас", f"shopnow:{aid}")],
             [_btn("💰 Прокачать аккаунт", f"upgradeacc:{aid}")],
             [_btn("💸 Перевести человеку", f"paystart:{aid}")],
@@ -572,6 +575,8 @@ class ControlBot:
                 await self._toggle(q, acc, "auto_repair_enabled")
             elif data.startswith("taccept:"):
                 await self._toggle(q, acc, "auto_accept_enabled")
+            elif data.startswith("tfarmmaint:"):
+                await self._toggle(q, acc, "farm_maintenance_enabled")
             elif data.startswith("tshop:"):
                 await self._toggle(q, acc, "phone_shop_enabled")
             elif data.startswith("tcaprelay:"):
@@ -586,6 +591,8 @@ class ControlBot:
                 await q.message.edit_text("Сколько покупать за раз (число), либо 0 — максимум доступного:")
             elif data.startswith("repairnow:"):
                 await self._start_repair_now(q, aid)
+            elif data.startswith("farmmaintnow:"):
+                await self._start_farm_maintenance_now(q, aid)
             elif data.startswith("shopnow:"):
                 await self._start_shop_now(q, aid)
             elif data.startswith("upgradeacc:"):
@@ -682,7 +689,7 @@ class ControlBot:
         default = False if field in (
             "autotrade_enabled", "containers_enabled",
             "auto_repair_enabled", "auto_accept_enabled", "phone_shop_enabled",
-            "containers_captcha_relay_enabled", "msg_alert_enabled",
+            "containers_captcha_relay_enabled", "msg_alert_enabled", "farm_maintenance_enabled",
         ) else True
         acc[field] = not acc.get(field, default)
         self.storage.save()
@@ -840,6 +847,18 @@ class ControlBot:
         result = await w.repair_now()
         acc = self.storage.get(aid)
         await self._safe_edit(q, self._account_text(acc) + f"\n\n🛠 {result}", self._account_menu(acc))
+
+    async def _start_farm_maintenance_now(self, q: CallbackQuery, aid: int) -> None:
+        w = self.manager.workers.get(aid)
+        if not w or not w.running:
+            return await q.answer("Аккаунт не запущен", show_alert=True)
+        await q.answer("⏳ Обслуживаю ферму (снимаю сломанные / возвращаю починенные)...")
+        asyncio.create_task(self._run_farm_maintenance_now(q, aid, w))
+
+    async def _run_farm_maintenance_now(self, q: CallbackQuery, aid: int, w) -> None:
+        result = await w.farm_maintenance_now()
+        acc = self.storage.get(aid)
+        await self._safe_edit(q, self._account_text(acc) + f"\n\n🔧 {result}", self._actions_menu(acc))
 
     async def _start_shop_now(self, q: CallbackQuery, aid: int) -> None:
         w = self.manager.workers.get(aid)

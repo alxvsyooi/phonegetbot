@@ -47,6 +47,7 @@ class _WorkerBase:
         self_commands_cfg: dict | None = None,
         shop_cfg: dict | None = None,
         repair_cfg: dict | None = None,
+        farm_maintenance_cfg: dict | None = None,
     ) -> None:
         self.account = account                 # ссылка на словарь из Storage (читаем «вживую»)
         self.storage = storage
@@ -56,6 +57,7 @@ class _WorkerBase:
         self.self_commands_cfg = self_commands_cfg or {}
         self.shop_cfg = shop_cfg or {}
         self.repair_cfg = repair_cfg or {}
+        self.farm_maintenance_cfg = farm_maintenance_cfg or {}
 
         self.client: Client | None = None
         self.running = False
@@ -79,6 +81,7 @@ class _WorkerBase:
         self.container_next_ts = now
         self.shop_next_ts = now
         self.repair_next_ts = now
+        self.farm_maintenance_next_ts = now
         self.status = "остановлен"
         self.last_card = "—"
         self.last_roulette = "—"
@@ -92,6 +95,7 @@ class _WorkerBase:
         self.last_repair = "—"
         self.last_upgrade = "—"
         self.last_accept = "—"
+        self.last_farm_maintenance = "—"
 
     # ---------- свойства ----------
     @property
@@ -364,18 +368,31 @@ class _WorkerBase:
 
     # ---------- клик по кнопке ----------
     async def _try_click(self, message, button_text: str) -> bool:
-        """Жмёт кнопку по подстроке (учёт эмодзи). Терпит отсутствие callback-ответа."""
+        """Жмёт кнопку по подстроке (учёт эмодзи). Терпит отсутствие callback-ответа.
+
+        Точное совпадение текста кнопки проверяется ПЕРВЫМ и имеет приоритет над
+        подстрокой: короткая метка вроде «Слот 1» иначе может подстрокой случайно
+        поймать «Слот 10»/«Слот 11»/«Слот 12» (та же проблема, что уже чинили
+        числовыми кнопками в farm.py/shop.py — см. _numeric_button)."""
         if message is None or not getattr(message, "reply_markup", None):
             return False
         target = None
-        sub = button_text.lower()
         for row in message.reply_markup.inline_keyboard:
             for b in row:
-                if sub in (getattr(b, "text", "") or "").lower():
+                if (getattr(b, "text", "") or "") == button_text:
                     target = b.text
                     break
             if target:
                 break
+        if not target:
+            sub = button_text.lower()
+            for row in message.reply_markup.inline_keyboard:
+                for b in row:
+                    if sub in (getattr(b, "text", "") or "").lower():
+                        target = b.text
+                        break
+                if target:
+                    break
         if not target:
             return False
         try:
