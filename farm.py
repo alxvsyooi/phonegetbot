@@ -1300,7 +1300,13 @@ class FarmModule:
             installed = await self._click_step(bot, page_msg, phone_btn, cfg, timeout=15)
             if installed is None:
                 return False
-            confirm_btn = _find_button(installed, "подтвердить")
+            # игра переспрашивает подтверждение кнопкой "Вставить в слот" (не
+            # "Подтвердить") - без этого клика телефон так и остаётся не
+            # установленным, а функция раньше молча считала это успехом
+            confirm_btn = (
+                _find_button(installed, "вставить в слот")
+                or _find_button(installed, "подтвердить")
+            )
             if confirm_btn:
                 await self._click_step(bot, installed, confirm_btn, cfg, timeout=15)
             return True
