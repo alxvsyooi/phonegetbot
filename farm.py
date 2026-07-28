@@ -845,10 +845,14 @@ class FarmModule:
                 if clicked3 and back_msg is not None:
                     root = back_msg
 
-        self.last_upgrade = (
-            (f"✅ прокачано ({clock()}):\n" + "\n".join(lines)) if any_upgraded
-            else f"✅ всё уже на максимуме ({clock()})"
-        )
+        all_maxed = all("максимум" in ln.lower() for ln in lines) if lines else True
+        if any_upgraded:
+            header = f"✅ прокачано ({clock()}):"
+        elif all_maxed:
+            header = f"✅ всё уже на максимуме ({clock()})"
+        else:
+            header = f"⚠️ прокачка не удалась ({clock()}):"
+        self.last_upgrade = f"{header}\n" + "\n".join(lines) if lines else header
         return self.last_upgrade
 
     async def _buy_category(
