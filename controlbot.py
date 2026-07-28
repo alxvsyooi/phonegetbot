@@ -534,7 +534,10 @@ class ControlBot:
                 await q.message.edit_text("Отправь интервал рулетки в секундах (>=10):")
             elif data.startswith("setmtime:"):
                 self._ask(uid, aid, "mining_time")
-                await q.message.edit_text("Отправь время майнинга по МСК ЧЧ:ММ (напр. 01:00):")
+                await q.message.edit_text(
+                    "Отправь время первого майнинга по МСК ЧЧ:ММ (напр. 01:00) — "
+                    "дальше сбор идёт каждые 4 часа от этого времени:"
+                )
             elif data.startswith("setpaypercent:"):
                 self._ask(uid, aid, "autopay_percent")
                 await q.message.edit_text(

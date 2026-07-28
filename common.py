@@ -33,6 +33,18 @@ def seconds_until_msk(hour: int, minute: int) -> float:
     return (target - now).total_seconds()
 
 
+def seconds_until_periodic_msk(hour: int, minute: int, period_hours: int) -> float:
+    """Как seconds_until_msk, но якорь hour:minute повторяется каждые period_hours
+    часов (а не раз в сутки) — следующее срабатывание вместо следующего дня."""
+    now = datetime.now(MSK)
+    anchor = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    period = timedelta(hours=period_hours)
+    if anchor <= now:
+        steps = (now - anchor) // period + 1
+        anchor += steps * period
+    return (anchor - now).total_seconds()
+
+
 def fmt_duration(seconds: int) -> str:
     seconds = max(0, int(seconds))
     h, rem = divmod(seconds, 3600)

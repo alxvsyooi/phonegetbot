@@ -21,8 +21,9 @@ from storage import (
     BALANCE_WORD, PAY_CONFIRM_BUTTON, CONTAINER_WORD,
     DAILY_REWARD_WORD, DAILY_REWARD_BUTTON,
     UPGRADE_WORD, UPGRADE_CATEGORIES, UPGRADE_MAX_MARKER, UPGRADE_BUY_BUTTON, UPGRADE_RESERVE,
+    MINING_INTERVAL_HOURS,
 )
-from common import MSK, parse_hhmm, seconds_until_msk, fmt_duration, clock, today_msk
+from common import MSK, parse_hhmm, seconds_until_periodic_msk, fmt_duration, clock, today_msk
 
 BUFFER_SEC = 5  # буфер к кулдауну, чтобы не упереться ровно в секунду
 
@@ -388,20 +389,29 @@ class FarmModule:
 
     # ---------- цикл майнинга (+ежедневная награда) ----------
     async def _mining_loop(self) -> None:
-        """Раз в сутки в заданное по МСК время. Опрос раз в 20с — время меняется на лету."""
+        """Каждые MINING_INTERVAL_HOURS часов, начиная от заданного по МСК времени
+        (ферма наполняется за 4 часа, а не за сутки). Опрос раз в 20с — время меняется
+        на лету. Ежедневная награда по-прежнему собирается раз в сутки, в это же окно."""
         last_fired = None
+        last_daily = None
         while self.running:
             try:
                 if self._trade_mode:
                     await asyncio.sleep(2)
                     continue
                 hour, minute = parse_hhmm(self.account.get("mining_time"))
-                self.mining_next_ts = time.time() + seconds_until_msk(hour, minute)
+                self.mining_next_ts = time.time() + seconds_until_periodic_msk(
+                    hour, minute, MINING_INTERVAL_HOURS
+                )
 
                 now = datetime.now(MSK)
-                due = now.hour == hour and now.minute == minute and last_fired != now.date()
+                due = (
+                    now.hour % MINING_INTERVAL_HOURS == hour % MINING_INTERVAL_HOURS
+                    and now.minute == minute
+                    and last_fired != (now.date(), now.hour)
+                )
                 if due and self._farm_active():
-                    last_fired = now.date()
+                    last_fired = (now.date(), now.hour)
                     if self.account.get("mining_enabled", True):
                         clicked = await self.collect_mining()
                         if clicked and self.account.get("autopay_enabled", True):
@@ -411,7 +421,12 @@ class FarmModule:
                                 await self.trade_runner(self.id)
                             except Exception as e:  # noqa: BLE001
                                 self.last_exchange = f"ошибка авто-трейда: {e}"
-                    if self.account.get("daily_reward_enabled", True):
+                    if (
+                        now.hour == hour and now.minute == minute
+                        and last_daily != now.date()
+                        and self.account.get("daily_reward_enabled", True)
+                    ):
+                        last_daily = now.date()
                         await self.collect_daily_reward()
                 await asyncio.sleep(20)
             except asyncio.CancelledError:

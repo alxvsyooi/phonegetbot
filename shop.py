@@ -84,8 +84,9 @@ class ShopModule:
         return self.account.get("enabled", True) and self.account.get("phone_shop_enabled", False)
 
     async def _auto_shop_loop(self) -> None:
-        """Раз в сутки, в mining_time по МСК — тот же принцип, что и у майнинга
-        (farm.py._mining_loop): опрос раз в 20с, время читается на лету."""
+        """Раз в сутки, в mining_time по МСК (в отличие от самого майнинга, который
+        с 2026-07-29 собирается каждые MINING_INTERVAL_HOURS часов — см.
+        farm.py._mining_loop). Опрос раз в 20с, время читается на лету."""
         last_fired = None
         while self.running:
             try:
