@@ -840,10 +840,19 @@ class FarmModule:
                 lines.append(f"• {label}: уже максимум")
 
             back_btn = _find_button(cur, "назад")
+            new_root = None
             if back_btn:
                 clicked3, back_msg = await self._click_and_wait(cur, back_btn, CARDS_BOT, timeout=15)
                 if clicked3 and back_msg is not None:
-                    root = back_msg
+                    new_root = back_msg
+            if new_root is None:
+                # неожиданный экран вместо магазина (например, попало уведомление о
+                # достижении, всплывшее от того же бота между кликами) - "назад" не
+                # нашли, а протухший root убивает ВСЕ следующие категории (клики по
+                # старому меню бот молча игнорирует) - переоткрываем магазин заново
+                new_root = await self._send_and_wait(CARDS_BOT, UPGRADE_WORD, timeout=15)
+            if new_root is not None:
+                root = new_root
 
         all_maxed = all("максимум" in ln.lower() for ln in lines) if lines else True
         if any_upgraded:
