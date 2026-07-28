@@ -797,14 +797,37 @@ class FarmModule:
                         f"не хватает баланса с запасом (цена {_fmt_points(cost)}, запас "
                         f"{_fmt_points(UPGRADE_RESERVE)}, баланс {_fmt_points(balance)})")
                     break
-                clicked2, cur2 = await self._click_and_wait(cur, buy_btn, CARDS_BOT, timeout=15)
-                if not clicked2 or cur2 is None:
+                clicked2, confirm_msg = await self._click_and_wait(cur, buy_btn, CARDS_BOT, timeout=15)
+                if not clicked2 or confirm_msg is None:
                     stop_reason = f"клик «{buy_btn}» не дал ответа, стоп"
+                    break
+                # игра теперь переспрашивает подтверждение перед покупкой (раньше
+                # апгрейд срабатывал одним кликом) — жмём «✅ Подтвердить», иначе
+                # застреваем на этом экране и «Улучшить за» больше не найти
+                confirm_btn = _find_button(confirm_msg, "подтвердить")
+                if not confirm_btn:
+                    stop_reason = "нет кнопки подтверждения покупки, стоп"
+                    break
+                clicked3, result_msg = await self._click_and_wait(
+                    confirm_msg, confirm_btn, CARDS_BOT, timeout=15)
+                if not clicked3 or result_msg is None:
+                    stop_reason = "подтверждение не дало ответа, стоп"
                     break
                 level_ups += 1
                 spent += cost
                 any_upgraded = True
-                cur = cur2
+                # экран успеха даёт «⬅️ Вернуться в магазин» (не «Назад») — жмём его,
+                # чтобы вернуться в деталку категории с обновлённой ценой след. уровня
+                return_btn = (
+                    _find_button(result_msg, "вернуться в магазин")
+                    or _find_button(result_msg, "назад")
+                )
+                if return_btn:
+                    clicked4, cur2 = await self._click_and_wait(
+                        result_msg, return_btn, CARDS_BOT, timeout=15)
+                    cur = cur2 if clicked4 and cur2 is not None else result_msg
+                else:
+                    cur = result_msg
 
             if level_ups:
                 summary = f"+{level_ups} ур. (потрачено {_fmt_points(spent)} ТОчек)"
