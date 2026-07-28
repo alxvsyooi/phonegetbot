@@ -232,8 +232,6 @@ class ControlBot:
             [_btn(f"🤝 Авто-трейд: {s('autotrade_enabled', False)}", f"ttrade:{aid}")],
             [_btn(f"📦 Магазин контейнеров: {s('containers_enabled', False)}", f"tcont:{aid}")],
             [_btn("📦 Какие категории покупать →", f"contcat:{aid}")],
-            [_btn(f"🔢 Капча: слать текст в личку: {s('containers_captcha_relay_enabled', False)}",
-                  f"tcaprelay:{aid}")],
             [_btn(f"🛠 Автопочинка своих телефонов: {s('auto_repair_enabled', False)}", f"trepair:{aid}")],
             [_btn(f"📥 Автопринятие чужих заказов: {s('auto_accept_enabled', False)}", f"taccept:{aid}")],
             [_btn(f"🔧 Обслуживание фермы (снять/починить/вернуть): {s('farm_maintenance_enabled', False)}",
@@ -582,8 +580,6 @@ class ControlBot:
                 await self._toggle(q, acc, "farm_maintenance_enabled")
             elif data.startswith("tshop:"):
                 await self._toggle(q, acc, "phone_shop_enabled")
-            elif data.startswith("tcaprelay:"):
-                await self._toggle(q, acc, "containers_captcha_relay_enabled")
             elif data.startswith("setrarity:"):
                 self._ask(uid, aid, "phone_shop_rarity")
                 await q.message.edit_text(
@@ -616,14 +612,6 @@ class ControlBot:
                 await q.answer("Пропущено")
                 await q.message.edit_text(f"⏭ Пропущено — «{acc.get('name')}»",
                                           reply_markup=self._account_menu(acc))
-                return
-            elif data.startswith("caprelay:"):
-                digits = data.split(":", 2)[2]
-                w = self.manager.workers.get(aid)
-                if not w or not getattr(w, "_captcha_relay_pending", False):
-                    return await q.answer("Уже неактуально", show_alert=True)
-                await q.answer(f"⏳ Отправляю «{digits}»...")
-                asyncio.create_task(self._run_captcha_relay(q, aid, w, digits))
                 return
             elif data.startswith("del:"):
                 await q.message.edit_text(
@@ -692,7 +680,7 @@ class ControlBot:
         default = False if field in (
             "autotrade_enabled", "containers_enabled",
             "auto_repair_enabled", "auto_accept_enabled", "phone_shop_enabled",
-            "containers_captcha_relay_enabled", "msg_alert_enabled", "farm_maintenance_enabled",
+            "msg_alert_enabled", "farm_maintenance_enabled",
         ) else True
         acc[field] = not acc.get(field, default)
         self.storage.save()
@@ -922,51 +910,11 @@ class ControlBot:
             except Exception:
                 pass
 
-    def _pending_captcha_relay(self, uid: int) -> list[tuple[dict, Any]]:
-        """Свои аккаунты, у которых сейчас ждём цифру-ответ капчи (тумблер
-        containers_captcha_relay_enabled) и окно ожидания ещё не истекло."""
-        now = time.time()
-        result = []
-        for acc in self._my_accounts(uid):
-            w = self.manager.workers.get(acc["id"])
-            if w and getattr(w, "_captcha_relay_pending", False) and now < getattr(w, "_captcha_relay_deadline", 0):
-                result.append((acc, w))
-        return result
-
-    async def _run_captcha_relay(self, reply_to: Message | CallbackQuery, aid: int, w, digits: str) -> None:
-        result = await w.send_captcha_digits(digits)
-        acc = self.storage.get(aid)
-        text = f"{self._account_text(acc)}\n\n📦 {result}" if acc else f"📦 {result}"
-        markup = self._account_menu(acc) if acc else None
-        if isinstance(reply_to, CallbackQuery):
-            await self._safe_edit(reply_to, text, markup)
-        else:
-            await reply_to.reply(text, reply_markup=markup)
-
     # ============ текстовый ввод (FSM) ============
     async def _on_text(self, m: Message) -> None:
         uid = m.from_user.id
         state = self.states.get(uid)
         if not state:
-            # никакого явного флоу («задай интервал» и т.п.) сейчас не ждём от
-            # пользователя — можно проверить, не цифра ли это ответ на капчу
-            # контейнеров (тумблер containers_captcha_relay_enabled). Если явный
-            # флоу ЕСТЬ (например, «отправь интервал карточек») — цифру всегда
-            # считаем ответом на НЕГО, капча-релей подождёт следующего сообщения.
-            txt = (m.text or "").strip()
-            if txt.isdigit():
-                pending = self._pending_captcha_relay(uid)
-                if len(pending) == 1:
-                    acc, w = pending[0]
-                    await m.reply(f"⏳ Отправляю «{txt}» игровому боту от «{acc.get('name')}»...")
-                    asyncio.create_task(self._run_captcha_relay(m, acc["id"], w, txt))
-                    return
-                if len(pending) > 1:
-                    rows = [[_btn(acc.get("name"), f"caprelay:{acc['id']}:{txt}")] for acc, _ in pending]
-                    await m.reply(
-                        "У тебя капча ждёт цифру-ответ сразу у нескольких аккаунтов — кому отправить?",
-                        reply_markup=InlineKeyboardMarkup(rows))
-                    return
             return
         if state.get("flow") == "set":
             await self._handle_set(m, state)

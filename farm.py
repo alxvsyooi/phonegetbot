@@ -978,48 +978,12 @@ class FarmModule:
         main = next((a for a in siblings if a.get("is_main")), None)
         return main is None or main.get("id") == self.id
 
-    async def _notify_owner_captcha_relay(self, shop_text: str | None) -> None:
-        """Альтернатива алерту с кнопками (тумблер containers_captcha_relay_enabled):
-        пересылает сырой текст капчи владельцу и ждёт от него ЦИФРУ ответом прямо в
-        чате с управляющим ботом — controlbot.py её подхватит и отправит через
-        send_captcha_digits()."""
-        owner_id = self.account.get("owner_id")
-        preview = shop_text.strip() if shop_text else "(текст капчи не распознан)"
-        text = (
-            f"🚨 Капча — магазин контейнеров, «{self.name}»\n\n"
-            f"«{preview[:500]}»\n\n"
-            f"Реши капчу и пришли мне сюда ТОЛЬКО цифру ответа — я сам отправлю её игровому боту."
-        )
-        self._captcha_relay_pending = True
-        self._captcha_relay_deadline = time.time() + 900
-        if not self.alert_fn:
-            print(f"[{self.name}] alert_fn не подключен — алерт капчи (релей) не отправлен")
-            return
-        try:
-            await self.alert_fn(owner_id, text, None)
-        except Exception as e:  # noqa: BLE001
-            print(f"[{self.name}] не удалось отправить алерт капчи (релей): {e}")
-
-    async def send_captcha_digits(self, digits: str) -> str:
-        """Отправляет цифру-ответ капчи от лица аккаунта игровому боту (владелец
-        решил её сам и прислал ответ в личку управляющему боту), затем один раз
-        пробует продолжить магазин — как кнопка «✅ Как настроено» в обычном алерте."""
-        self._captcha_relay_pending = False
-        if not self.client or not self.running:
-            return "аккаунт не запущен"
-        await self.client.send_message(CARDS_BOT, digits)
-        await asyncio.sleep(2)
-        return await self.resume_container_check()
-
     async def _notify_owner_captcha(self, cfg: dict, shop_text: str | None, reason: str = "captcha") -> None:
         owner_id = self.account.get("owner_id")
         if not owner_id or not self.account.get("alerts_enabled", True):
             return
         if reason == "captcha":
             if not self._captcha_alert_allowed():
-                return
-            if self.account.get("containers_captcha_relay_enabled", False):
-                await self._notify_owner_captcha_relay(shop_text)
                 return
         alert = cfg.get("captcha_alert_text", "КАПЧА")
         preview = f"\n\n«{shop_text[:300]}»" if shop_text else ""
