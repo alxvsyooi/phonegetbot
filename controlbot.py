@@ -233,6 +233,10 @@ class ControlBot:
             [_btn(f"📦 Магазин контейнеров: {s('containers_enabled', False)}", f"tcont:{aid}")],
             [_btn("📦 Какие категории покупать →", f"contcat:{aid}")],
             [_btn(f"🛠 Автопочинка своих телефонов: {s('auto_repair_enabled', False)}", f"trepair:{aid}")],
+            [_btn(f"🌍 Чужая мастерская, если своей не хватает: {s('repair_external_workshop_enabled', False)}",
+                  f"textworkshop:{aid}")],
+            [_btn(f"🌍 Имя чужой мастерской: {acc.get('repair_external_workshop_name') or 'любая свободная'}",
+                  f"setworkshop:{aid}")],
             [_btn(f"📥 Автопринятие чужих заказов: {s('auto_accept_enabled', False)}", f"taccept:{aid}")],
             [_btn(f"🔧 Обслуживание фермы (снять/починить/вернуть): {s('farm_maintenance_enabled', False)}",
                   f"tfarmmaint:{aid}")],
@@ -574,6 +578,14 @@ class ControlBot:
                 await self._start_drain(q, acc)
             elif data.startswith("trepair:"):
                 await self._toggle(q, acc, "auto_repair_enabled")
+            elif data.startswith("textworkshop:"):
+                await self._toggle(q, acc, "repair_external_workshop_enabled")
+            elif data.startswith("setworkshop:"):
+                self._ask(uid, aid, "repair_external_workshop_name")
+                await q.message.edit_text(
+                    "🌍 Имя/владелец конкретной чужой мастерской (подстрока для поиска в списке "
+                    "при выборе, куда сдать телефон в ремонт). Пришли «-» чтобы очистить — "
+                    "тогда при нехватке своего инструмента будет браться первая мастерская из списка:")
             elif data.startswith("taccept:"):
                 await self._toggle(q, acc, "auto_accept_enabled")
             elif data.startswith("tfarmmaint:"):
@@ -681,6 +693,7 @@ class ControlBot:
             "autotrade_enabled", "containers_enabled",
             "auto_repair_enabled", "auto_accept_enabled", "phone_shop_enabled",
             "msg_alert_enabled", "farm_maintenance_enabled",
+            "repair_external_workshop_enabled",
         ) else True
         acc[field] = not acc.get(field, default)
         self.storage.save()
@@ -956,6 +969,13 @@ class ControlBot:
             self.states.pop(uid, None)
             await m.reply(f"📦 Категории контейнеров — <b>{acc.get('name')}</b>",
                           reply_markup=self._container_categories_menu(acc))
+            return
+        elif field == "repair_external_workshop_name":
+            acc[field] = "" if val in ("-", "—", "нет") else val
+            self.storage.save()
+            self.states.pop(uid, None)
+            await m.reply(f"⚙️ Автоматизация — <b>{acc.get('name')}</b>",
+                          reply_markup=self._automation_menu(acc))
             return
         elif field == "phone_shop_rarity":
             if not val:

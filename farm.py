@@ -1134,6 +1134,12 @@ class FarmModule:
         -> перебор редкостей -> модель по имени -> установка, если рабочий
         экземпляр этой модели уже найден в инвентаре (т.е. ремонт уже завершился).
 
+        Игра требует выключенную ферму для установки/извлечения телефона из слота
+        («Для установки или извлечения телефона необходимо выключить ферму») —
+        если есть что снимать/ставить, сначала жмём «Выключить», в конце (через
+        finally, даже если по пути была ошибка) возвращаем «Включить», но только
+        если выключали её мы сами (уже выключенную кем-то ещё не трогаем).
+
         Между шагами команда «Тмайнинг» отправляется заново (не идёт «назад» по
         уже открытым меню) — так же, как _buy_containers() между категориями:
         меньше риска зависнуть на устаревшем сообщении, если бот отредактировал
@@ -1147,6 +1153,7 @@ class FarmModule:
         cfg = self.farm_maintenance_cfg
         bot = cfg.get("bot") or CARDS_BOT
         mining_cmd = cfg.get("mining_command") or MINING_WORD
+        powered_off = False
         try:
             root = await self._send_and_wait(bot, mining_cmd, timeout=20)
             if root is None:
@@ -1162,8 +1169,16 @@ class FarmModule:
                 if info.get("model"):
                     slot_models[str(num)] = info["model"]
 
+            broken_nums = sorted(n for n, i in slots.items() if i["status"] == "broken")
+            pending_empty_nums = [
+                n for n, i in slots.items() if i["status"] == "empty" and slot_models.get(str(n))
+            ]
+            if broken_nums or pending_empty_nums:
+                off_result = await self._click_step(bot, root, cfg.get("power_off_button", "выключить"), cfg)
+                powered_off = off_result is not None
+
             extracted: list[str] = []
-            for num in sorted(n for n, i in slots.items() if i["status"] == "broken"):
+            for num in broken_nums:
                 fresh = await self._send_and_wait(bot, mining_cmd, timeout=20)
                 if fresh is None:
                     break
@@ -1211,6 +1226,14 @@ class FarmModule:
         except Exception as e:  # noqa: BLE001
             self.last_farm_maintenance = f"ошибка: {e}"
             return self.last_farm_maintenance
+        finally:
+            if powered_off:
+                try:
+                    fresh = await self._send_and_wait(bot, mining_cmd, timeout=20)
+                    if fresh is not None:
+                        await self._click_step(bot, fresh, cfg.get("power_on_button", "включить"), cfg)
+                except Exception:  # noqa: BLE001
+                    pass
 
     async def _click_exact_step(self, bot: str, msg, exact_text: str, cfg: dict, timeout: int = 15):
         """Как _click_step, но клик СТРОГО по уже разрешённому exact_text (без
