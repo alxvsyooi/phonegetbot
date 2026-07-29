@@ -64,10 +64,18 @@ def parse_farm_slots(text: str | None) -> dict[int, dict]:
             slots[num] = {"status": "empty"}
         elif FARM_BROKEN_MARKER in low:
             model = re.sub(rf"[^\w]*{FARM_BROKEN_MARKER}[^\w]*", "", rest, flags=re.IGNORECASE).strip()
-            slots[num] = {"status": "broken", "model": model or rest}
+            model = _strip_status_emoji(model) or rest
+            slots[num] = {"status": "broken", "model": model}
         else:
-            slots[num] = {"status": "working", "model": rest}
+            slots[num] = {"status": "working", "model": _strip_status_emoji(rest) or rest}
     return slots
+
+
+# каждый слот теперь помечен цветным индикатором-эмодзи статуса («🟢 Model», «🔴
+# Model (СЛОМАН)») — модель нужна БЕЗ этого префикса, иначе она не совпадёт с
+# «Model (xN)» из списка телефонов при переустановке в слот (farm_maintenance)
+def _strip_status_emoji(name: str) -> str:
+    return re.sub(r"^[^\w]+", "", name).strip()
 
 
 def parse_farm_balance(text: str | None) -> tuple[float, int] | None:
@@ -75,6 +83,19 @@ def parse_farm_balance(text: str | None) -> tuple[float, int] | None:
         return None
     m = _FARM_BALANCE_RE.search(text)
     return (float(m.group(1)), int(m.group(2))) if m else None
+
+
+# после обновления игры у фермы появился персистентный тумблер вкл/выкл
+# («Состояние: Включена/Выключена» + кнопка «Выключить»/«Включить») — по
+# умолчанию НОВАЯ ферма выключена и не майнит, пока её не включат вручную
+_FARM_STATE_RE = re.compile(r"состояние:\s*(включена|выключена)", re.IGNORECASE)
+
+
+def parse_farm_state(text: str | None) -> str | None:
+    if not text:
+        return None
+    m = _FARM_STATE_RE.search(text)
+    return m.group(1).lower() if m else None
 
 
 def parse_cooldown(text: str | None) -> int | None:
@@ -1136,8 +1157,25 @@ class FarmModule:
             print(f"[{self.name}] не удалось отправить алерт через управляющего бота: {e}")
 
     # ---------- действия ----------
+    async def _ensure_farm_on(self, root, cfg: dict | None = None):
+        """Если ответ на «Тмайнинг» показывает «Состояние: Выключена» — жмёт
+        «Включить». Новая ферма (после обновления игры) по умолчанию выключена
+        и не майнит, пока её не включат явно — без этой проверки автосбор
+        майнинга/обслуживание фермы могли бы молча простаивать бесконечно на
+        выключенной ферме. Возвращает актуальное сообщение (то же, если ферма
+        уже была включена или кнопки не нашлось)."""
+        cfg = cfg if cfg is not None else self.farm_maintenance_cfg
+        if parse_farm_state(_msg_text(root)) != "выключена":
+            return root
+        on_btn = _find_button(root, cfg.get("power_on_button", "включить"))
+        if not on_btn:
+            return root
+        clicked, resumed = await self._click_and_wait(root, on_btn, CARDS_BOT, timeout=15)
+        return resumed if clicked and resumed is not None else root
+
     async def collect_mining(self) -> bool:
-        """«Тмайнинг» -> «Снять деньги с фермы». True при успехе."""
+        """«Тмайнинг» -> (включить ферму, если выключена) -> «Снять деньги с
+        фермы». True при успехе."""
         if not self.client or not self.running:
             self.last_mining = "аккаунт не запущен"
             return False
@@ -1146,6 +1184,7 @@ class FarmModule:
             return False
         try:
             reply = await self._send_and_wait(CARDS_BOT, MINING_WORD)
+            reply = await self._ensure_farm_on(reply)
             clicked = await self._try_click(reply, FARM_WITHDRAW_BUTTON)
             if clicked:
                 self._bump("mining")
@@ -1245,6 +1284,7 @@ class FarmModule:
             if root is None:
                 self.last_farm_maintenance = f"⚠️ нет ответа на «{mining_cmd}» ({clock()})"
                 return self.last_farm_maintenance
+            root = await self._ensure_farm_on(root, cfg)
             slots = parse_farm_slots(_msg_text(root))
             if not slots:
                 self.last_farm_maintenance = f"⚠️ не разобрал слоты фермы ({clock()})"
