@@ -275,7 +275,11 @@ class ControlBot:
         return InlineKeyboardMarkup([
             [_btn(f"⏱ Карточки: {acc.get('card_interval', 3600)}с", f"setcard:{aid}")],
             [_btn(f"⏱ Рулетка: {acc.get('roulette_interval', 3600)}с", f"setroul:{aid}")],
-            [_btn(f"⏰ Майнинг (МСК): {acc.get('mining_time', '01:00')}", f"setmtime:{aid}")],
+            [_btn(f"⛏ Майнинг — проверять раз в: {acc.get('mining_check_interval_minutes', 240)} мин",
+                  f"setmininterval:{aid}")],
+            [_btn(f"🎁 Ежедневная награда (МСК): {acc.get('mining_time', '01:00')}", f"setmtime:{aid}")],
+            [_btn(f"💸 Авто-вывод — раз в: {acc.get('autopay_interval', 14400)}с", f"setpayinterval:{aid}")],
+            [_btn(f"🤝 Авто-трейд — раз в: {acc.get('autotrade_interval', 14400)}с", f"settradeinterval:{aid}")],
             [_btn("⬅️ Назад", f"farm:{aid}")],
         ])
 
@@ -534,12 +538,23 @@ class ControlBot:
             elif data.startswith("setroul:"):
                 self._ask(uid, aid, "roulette_interval")
                 await q.message.edit_text("Отправь интервал рулетки в секундах (>=10):")
+            elif data.startswith("setmininterval:"):
+                self._ask(uid, aid, "mining_check_interval_minutes")
+                await q.message.edit_text(
+                    "Отправь раз во сколько минут проверять/собирать майнинг (число, >=1):"
+                )
             elif data.startswith("setmtime:"):
                 self._ask(uid, aid, "mining_time")
                 await q.message.edit_text(
-                    "Отправь время первого майнинга по МСК ЧЧ:ММ (напр. 01:00) — "
-                    "дальше сбор идёт каждые 4 часа от этого времени:"
+                    "Отправь время ежедневной награды по МСК ЧЧ:ММ (напр. 01:00) — "
+                    "на сбор майнинга больше не влияет, у него свой интервал в минутах:"
                 )
+            elif data.startswith("setpayinterval:"):
+                self._ask(uid, aid, "autopay_interval")
+                await q.message.edit_text("Отправь интервал авто-вывода очков в секундах (>=60):")
+            elif data.startswith("settradeinterval:"):
+                self._ask(uid, aid, "autotrade_interval")
+                await q.message.edit_text("Отправь интервал авто-трейда в секундах (>=60):")
             elif data.startswith("setpaypercent:"):
                 self._ask(uid, aid, "autopay_percent")
                 await q.message.edit_text(
@@ -955,6 +970,24 @@ class ControlBot:
                 await m.reply("Нужно число секунд (>=10). Ещё раз:")
                 return
             acc[field] = int(val)
+        elif field in ("autopay_interval", "autotrade_interval"):
+            if not val.isdigit() or int(val) < 60:
+                await m.reply("Нужно число секунд (>=60). Ещё раз:")
+                return
+            acc[field] = int(val)
+            self.storage.save()
+            self.states.pop(uid, None)
+            await m.reply(f"⏱ Интервалы — <b>{acc.get('name')}</b>", reply_markup=self._intervals_menu(acc))
+            return
+        elif field == "mining_check_interval_minutes":
+            if not val.isdigit() or int(val) < 1:
+                await m.reply("Нужно число минут (>=1). Ещё раз:")
+                return
+            acc[field] = int(val)
+            self.storage.save()
+            self.states.pop(uid, None)
+            await m.reply(f"⏱ Интервалы — <b>{acc.get('name')}</b>", reply_markup=self._intervals_menu(acc))
+            return
         elif field == "drain_amount":
             if not val.isdigit():
                 await m.reply("Нужно число очков (0 — отключить). Ещё раз:")
@@ -1013,6 +1046,10 @@ class ControlBot:
                 await m.reply("Формат ЧЧ:ММ, напр. 01:00. Ещё раз:")
                 return
             acc[field] = f"{int(mt.group(1)):02d}:{int(mt.group(2)):02d}"
+            self.storage.save()
+            self.states.pop(uid, None)
+            await m.reply(f"⏱ Интервалы — <b>{acc.get('name')}</b>", reply_markup=self._intervals_menu(acc))
+            return
         elif field in ("payout_target", "trade_target"):
             if val in ("-", "—", "нет"):
                 acc[field] = ""

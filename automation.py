@@ -76,6 +76,8 @@ class _WorkerBase:
         self.card_next_ts = now
         self.roulette_next_ts = now
         self.mining_next_ts = now
+        self.autopay_next_ts = now
+        self.autotrade_next_ts = now
         self.container_next_ts = now
         self.shop_next_ts = now
         self.repair_next_ts = now

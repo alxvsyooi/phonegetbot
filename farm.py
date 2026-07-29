@@ -21,9 +21,8 @@ from storage import (
     BALANCE_WORD, PAY_CONFIRM_BUTTON, CONTAINER_WORD,
     DAILY_REWARD_WORD, DAILY_REWARD_BUTTON,
     UPGRADE_WORD, UPGRADE_CATEGORIES, UPGRADE_MAX_MARKER, UPGRADE_BUY_BUTTON, UPGRADE_RESERVE,
-    MINING_INTERVAL_HOURS,
 )
-from common import MSK, parse_hhmm, seconds_until_periodic_msk, fmt_duration, clock, today_msk
+from common import MSK, parse_hhmm, fmt_duration, clock, today_msk
 
 BUFFER_SEC = 5  # буфер к кулдауну, чтобы не упереться ровно в секунду
 
@@ -299,7 +298,9 @@ class FarmModule:
     def _loops(self):
         return super()._loops() + [
             self._card_loop(), self._roulette_loop(),
-            self._mining_loop(), self._container_loop(),
+            self._mining_loop(), self._daily_reward_loop(),
+            self._autopay_loop(), self._autotrade_loop(),
+            self._container_loop(),
             self._farm_maintenance_loop(),
         ]
 
@@ -387,53 +388,109 @@ class FarmModule:
                 self.roulette_next_ts = time.time() + 60
                 await asyncio.sleep(5)
 
-    # ---------- цикл майнинга (+ежедневная награда) ----------
+    # ---------- цикл майнинга ----------
     async def _mining_loop(self) -> None:
-        """Каждые MINING_INTERVAL_HOURS часов, начиная от заданного по МСК времени
-        (ферма наполняется за 4 часа, а не за сутки). Опрос раз в 20с — время меняется
-        на лету. Ежедневная награда по-прежнему собирается раз в сутки, в это же окно."""
-        last_fired = None
-        last_daily = None
+        """Раз в mining_check_interval_minutes минут (настраивается в боте, по
+        умолчанию 240 = как было раньше) проверяет ферму и собирает майнинг.
+        Больше НЕ привязан к конкретному времени по МСК — простой периодический
+        опрос от текущего момента, как farm_maintenance/repair. Ежедневная награда,
+        авто-вывод и авто-трейд — свои независимые циклы ниже (раньше все три были
+        жёстко привязаны к этому же циклу и срабатывали только вместе со сбором
+        майнинга — отвязано по просьбе, чтобы майнинг можно было проверять часто,
+        не заваливая при этом трейдами/выводами на каждый чих)."""
         while self.running:
             try:
-                if self._trade_mode:
-                    await asyncio.sleep(2)
+                if self._trade_mode or not self._farm_active() or not self.account.get("mining_enabled", True):
+                    await asyncio.sleep(20)
                     continue
-                hour, minute = parse_hhmm(self.account.get("mining_time"))
-                self.mining_next_ts = time.time() + seconds_until_periodic_msk(
-                    hour, minute, MINING_INTERVAL_HOURS
-                )
-
-                now = datetime.now(MSK)
-                due = (
-                    now.hour % MINING_INTERVAL_HOURS == hour % MINING_INTERVAL_HOURS
-                    and now.minute == minute
-                    and last_fired != (now.date(), now.hour)
-                )
-                if due and self._farm_active():
-                    last_fired = (now.date(), now.hour)
-                    if self.account.get("mining_enabled", True):
-                        clicked = await self.collect_mining()
-                        if clicked and self.account.get("autopay_enabled", True):
-                            await self._payout()
-                        if clicked and self.account.get("autotrade_enabled", False) and self.trade_runner:
-                            try:
-                                await self.trade_runner(self.id)
-                            except Exception as e:  # noqa: BLE001
-                                self.last_exchange = f"ошибка авто-трейда: {e}"
-                    if (
-                        now.hour == hour and now.minute == minute
-                        and last_daily != now.date()
-                        and self.account.get("daily_reward_enabled", True)
-                    ):
-                        last_daily = now.date()
-                        await self.collect_daily_reward()
-                await asyncio.sleep(20)
+                now = time.time()
+                if now < self.mining_next_ts:
+                    await asyncio.sleep(min(20, self.mining_next_ts - now))
+                    continue
+                await self.collect_mining()
+                minutes = max(1, int(self.account.get("mining_check_interval_minutes", 240)))
+                self.mining_next_ts = time.time() + minutes * 60
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
                 self.last_mining = f"ошибка: {e}"
+                self.mining_next_ts = time.time() + 60
+                await asyncio.sleep(5)
+
+    # ---------- ежедневная награда (свой якорь по mining_time, раз в сутки) ----------
+    async def _daily_reward_loop(self) -> None:
+        last_daily = None
+        while self.running:
+            try:
+                if (
+                    self._trade_mode or not self._farm_active()
+                    or not self.account.get("daily_reward_enabled", True)
+                ):
+                    await asyncio.sleep(20)
+                    continue
+                hour, minute = parse_hhmm(self.account.get("mining_time"))
+                now = datetime.now(MSK)
+                if now.hour == hour and now.minute == minute and last_daily != now.date():
+                    last_daily = now.date()
+                    await self.collect_daily_reward()
                 await asyncio.sleep(20)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                self.last_daily = f"ошибка: {e}"
+                await asyncio.sleep(20)
+
+    # ---------- авто-вывод очков (независимый цикл, свой интервал) ----------
+    async def _autopay_loop(self) -> None:
+        while self.running:
+            try:
+                if (
+                    self._trade_mode or not self._farm_active()
+                    or not self.account.get("autopay_enabled", True)
+                ):
+                    await asyncio.sleep(20)
+                    continue
+                now = time.time()
+                if now < self.autopay_next_ts:
+                    await asyncio.sleep(min(30, self.autopay_next_ts - now))
+                    continue
+                await self._payout()
+                interval = max(60, int(self.account.get("autopay_interval", 14400)))
+                self.autopay_next_ts = time.time() + interval
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                self.last_payout = f"ошибка авто-вывода: {e}"
+                self.autopay_next_ts = time.time() + 60
+                await asyncio.sleep(5)
+
+    # ---------- авто-трейд (независимый цикл, свой интервал) ----------
+    async def _autotrade_loop(self) -> None:
+        while self.running:
+            try:
+                if (
+                    self._trade_mode or not self._farm_active()
+                    or not self.account.get("autotrade_enabled", False)
+                    or not self.trade_runner
+                ):
+                    await asyncio.sleep(20)
+                    continue
+                now = time.time()
+                if now < self.autotrade_next_ts:
+                    await asyncio.sleep(min(30, self.autotrade_next_ts - now))
+                    continue
+                try:
+                    await self.trade_runner(self.id)
+                except Exception as e:  # noqa: BLE001
+                    self.last_exchange = f"ошибка авто-трейда: {e}"
+                interval = max(60, int(self.account.get("autotrade_interval", 14400)))
+                self.autotrade_next_ts = time.time() + interval
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                self.last_exchange = f"ошибка авто-трейда: {e}"
+                self.autotrade_next_ts = time.time() + 300
+                await asyncio.sleep(5)
 
     # ---------- магазин контейнеров ----------
     async def _container_loop(self) -> None:
@@ -465,8 +522,17 @@ class FarmModule:
         sold_out_marker = (cfg.get("sold_out_marker") or "раскуплены").lower()
         captcha_marker = (cfg.get("captcha_marker") or "анти-бот защита").lower()
         shop_marker = (cfg.get("shop_marker") or "магазин контейнеров").lower()
+        miniapp_marker = (cfg.get("miniapp_button_marker") or "войти в магазин").lower()
         if sold_out_marker in low:
             return "sold_out"
+        # магазин контейнеров переехал в мини-апп (кнопка «Войти в магазин
+        # контейнеров» открывает WebView) — категорий бюджет/дорогой/донат в
+        # этом сообщении больше нет, кликать по ним нечего. Проверяем ДО общего
+        # shop_marker (тот всё ещё встречается в приветственном тексте мини-аппа)
+        if _find_button(reply, miniapp_marker) and not any(
+            _find_button(reply, kw) for kw in ("бюджет", "донат", "дорог")
+        ):
+            return "miniapp"
         if shop_marker in low or any(_find_button(reply, kw) for kw in ("бюджет", "донат", "дорог")):
             return "shop"
         if captcha_marker in low:
@@ -475,8 +541,8 @@ class FarmModule:
 
     async def _probe_shop(self, cfg: dict) -> tuple[str, object, str | None]:
         """Один запрос открытия магазина (отправляет команду заново). Возвращает
-        (kind, reply, text), где kind — 'sold_out' | 'shop' | 'captcha' |
-        'none' (бот не ответил) | 'unknown'."""
+        (kind, reply, text), где kind — 'sold_out' | 'shop' | 'miniapp' (переехал
+        в WebView, кликать нечего) | 'captcha' | 'none' (бот не ответил) | 'unknown'."""
         bot = cfg.get("bot") or CARDS_BOT
         open_cmd = cfg.get("open_command") or CONTAINER_WORD
         reply = await self._send_and_wait(bot, open_cmd, timeout=20)
@@ -513,6 +579,9 @@ class FarmModule:
           ровно в момент рестока игровой бот перегружен и не отвечает, ловить его нужно
           с запасом, а не начинать долбить холодным стартом именно в этот момент;
         - меню магазина (категории) -> купить по preferred_categories/тумблерам;
+        - магазин переехал в мини-апп (кнопка «Войти в магазин контейнеров», WebView,
+          категорий бюджет/дорогой/донат в сообщении больше нет) -> кликать нечего,
+          честно пишем в статус и ждём unknown_retry, без алерта владельцу;
         - нет ответа вообще -> игровой бот перегружен (частая ситуация на рестоке) —
           ЭТО можно долбить: повтор открытия с периодичностью retry_interval, не
           дольше retry_window (после расчётного рестока, если он известен);
@@ -584,6 +653,17 @@ class FarmModule:
                     self.last_container = f"⏳ раскуплены, след. через {fmt_duration(delay)} ({clock()} {today_msk()})"
                     return self.last_container
 
+                if kind == "miniapp":
+                    # магазин контейнеров теперь мини-апп (WebView) — кликами по обычным
+                    # inline-кнопкам туда не попасть и купить нечем, честно про это и пишем
+                    # вместо вводящего в заблуждение «покупать нечего»
+                    self.container_next_ts = time.time() + unknown_retry
+                    self.last_container = (
+                        f"🌐 магазин контейнеров теперь мини-апп — авто-покупка кликами "
+                        f"недоступна, нужно вручную ({clock()} {today_msk()})"
+                    )
+                    return self.last_container
+
                 if kind == "shop":
                     bought = await self._buy_containers(bot, reply, cfg)
                     self.container_next_ts = time.time() + unknown_retry
@@ -649,6 +729,12 @@ class FarmModule:
                 delay = cd if cd is not None else unknown_retry
                 self.container_next_ts = time.time() + max(0, delay - early_start) + BUFFER_SEC
                 self.last_container = f"⏳ раскуплены, след. через {fmt_duration(delay)} ({clock()} {today_msk()})"
+            elif kind == "miniapp":
+                self.container_next_ts = time.time() + unknown_retry
+                self.last_container = (
+                    f"🌐 магазин контейнеров теперь мини-апп — авто-покупка кликами "
+                    f"недоступна, нужно вручную ({clock()} {today_msk()})"
+                )
             elif kind == "shop":
                 eff_cfg = cfg
                 if prefer and prefer != "default":

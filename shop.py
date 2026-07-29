@@ -85,8 +85,9 @@ class ShopModule:
 
     async def _auto_shop_loop(self) -> None:
         """Раз в сутки, в mining_time по МСК (в отличие от самого майнинга, который
-        с 2026-07-29 собирается каждые MINING_INTERVAL_HOURS часов — см.
-        farm.py._mining_loop). Опрос раз в 20с, время читается на лету."""
+        собирается на своём отдельном настраиваемом интервале в минутах — см.
+        farm.py._mining_loop / account.mining_check_interval_minutes). Опрос раз в
+        20с, время читается на лету."""
         last_fired = None
         while self.running:
             try:

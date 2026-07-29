@@ -33,6 +33,7 @@ _CAPACITY_RE = re.compile(r"занято ремонтом\D*?(\d+)\s*/\s*(\d+)",
 _MODEL_RE = re.compile(r"модель\s*:?\s*(.+)", re.IGNORECASE)
 _BREAKAGES_RE = re.compile(r"поломки\s*:?\s*(.+)", re.IGNORECASE)
 _COUNT_RE = re.compile(r"\((\d+)\)\s*$")
+_MODEL_COUNT_RE = re.compile(r"\(\s*x?\s*(\d+)\s*\)\s*$", re.IGNORECASE)
 
 
 def _all_buttons(message) -> list[str]:
@@ -52,6 +53,23 @@ def _find_button(message, substr: str) -> str | None:
 def _first_nonempty_category(message) -> str | None:
     for t in _all_buttons(message):
         m = _COUNT_RE.search(t.strip())
+        if m and int(m.group(1)) > 0:
+            return t
+    return None
+
+
+def _first_model_button(message) -> str | None:
+    """Внутри категории («Ширпотреб» и т.п.) телефоны сгруппированы по модели —
+    кнопки вида «Модель (xN)» (счётчик с «x», в отличие от категорий верхнего
+    уровня «Категория (N)» без «x» — другой формат, отдельный regex). Берём
+    первую модель с ненулевым количеством; сама карточка ремонта откроется
+    только после клика по ней (категория сама по себе — ещё не карточка)."""
+    skip = ("назад", "вернуться")
+    for t in _all_buttons(message):
+        low = t.strip().lower()
+        if any(s in low for s in skip):
+            continue
+        m = _MODEL_COUNT_RE.search(t.strip())
         if m and int(m.group(1)) > 0:
             return t
     return None
@@ -198,6 +216,18 @@ class RepairModule:
             if not clicked or phone_card is None:
                 self.last_repair = f"⚠️ нет ответа при открытии категории ({clock()})"
                 return self.last_repair
+
+            # категория открывает список МОДЕЛЕЙ («Модель (xN)»), а не сразу карточку
+            # ремонта — спускаемся на уровень ниже, если поломок в ответе ещё нет
+            if not _BREAKAGES_RE.search(_msg_text(phone_card)):
+                model_btn = _first_model_button(phone_card)
+                if not model_btn:
+                    self.last_repair = f"⚠️ не нашёл модель в категории «{cat_btn}» ({clock()})"
+                    return self.last_repair
+                clicked, phone_card = await self._click_retry(phone_card, model_btn, bot, cfg)
+                if not clicked or phone_card is None:
+                    self.last_repair = f"⚠️ нет ответа при открытии модели «{model_btn}» ({clock()})"
+                    return self.last_repair
 
             self.last_repair = await self._repair_this_phone(bot, phone_card, cfg)
             return self.last_repair
