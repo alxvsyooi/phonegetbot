@@ -218,31 +218,80 @@ class ControlBot:
         return (f"📨 <b>Автоотправка</b> — {acc.get('name')}\nМодуль: {ae}\n"
                 f"Задач настроено: {n}")
 
+    @staticmethod
+    def _s(acc: dict, f: str, d: bool = True) -> str:
+        return "вкл ✅" if acc.get(f, d) else "выкл ❌"
+
     def _automation_menu(self, acc: dict) -> InlineKeyboardMarkup:
+        """Верхний уровень «⚙️ Автоматизация» — только навигация по группам,
+        сами тумблеры живут в подменю ниже (было одним длинным плоским списком
+        из 17 кнопок вперемешку — разложено по смыслу)."""
         aid = acc["id"]
-        def s(f, d=True):
-            return "вкл ✅" if acc.get(f, d) else "выкл ❌"
         return InlineKeyboardMarkup([
-            [_btn(f"🃏 Карточки: {s('card_enabled')}", f"tcard:{aid}")],
-            [_btn(f"🎰 Рулетка: {s('roulette_enabled')}", f"troul:{aid}")],
-            [_btn(f"⛏ Майнинг: {s('mining_enabled')}", f"tmine:{aid}")],
-            [_btn(f"🎁 Ежедневная награда: {s('daily_reward_enabled')}", f"tdaily:{aid}")],
-            [_btn(f"💸 Авто-вывод: {s('autopay_enabled')}", f"tpay:{aid}")],
+            [_btn("🎮 Игровой цикл", f"autgame:{aid}")],
+            [_btn("💰 Финансы", f"autfin:{aid}")],
+            [_btn("📦 Магазин контейнеров", f"autcnt:{aid}")],
+            [_btn("🛠 Мастерская (ремонт)", f"autrep:{aid}")],
+            [_btn("🔧 Ферма", f"autfrm:{aid}")],
+            [_btn("🏪 Магазин телефонов", f"autphn:{aid}")],
+            [_btn("⬅️ Назад", f"farm:{aid}")],
+        ])
+
+    def _autom_game_menu(self, acc: dict) -> InlineKeyboardMarkup:
+        aid = acc["id"]
+        return InlineKeyboardMarkup([
+            [_btn(f"🃏 Карточки: {self._s(acc, 'card_enabled')}", f"tcard:{aid}")],
+            [_btn(f"🎰 Рулетка: {self._s(acc, 'roulette_enabled')}", f"troul:{aid}")],
+            [_btn(f"⛏ Майнинг: {self._s(acc, 'mining_enabled')}", f"tmine:{aid}")],
+            [_btn(f"🎁 Ежедневная награда: {self._s(acc, 'daily_reward_enabled')}", f"tdaily:{aid}")],
+            [_btn("⬅️ Назад", f"autom:{aid}")],
+        ])
+
+    def _autom_finance_menu(self, acc: dict) -> InlineKeyboardMarkup:
+        aid = acc["id"]
+        return InlineKeyboardMarkup([
+            [_btn(f"💸 Авто-вывод: {self._s(acc, 'autopay_enabled')}", f"tpay:{aid}")],
             [_btn(f"💸 Процент вывода: {acc.get('autopay_percent', 100)}%", f"setpaypercent:{aid}")],
-            [_btn(f"🤝 Авто-трейд: {s('autotrade_enabled', False)}", f"ttrade:{aid}")],
-            [_btn(f"📦 Магазин контейнеров: {s('containers_enabled', False)}", f"tcont:{aid}")],
+            [_btn(f"🤝 Авто-трейд: {self._s(acc, 'autotrade_enabled', False)}", f"ttrade:{aid}")],
+            [_btn("⬅️ Назад", f"autom:{aid}")],
+        ])
+
+    def _autom_containers_menu(self, acc: dict) -> InlineKeyboardMarkup:
+        aid = acc["id"]
+        return InlineKeyboardMarkup([
+            [_btn(f"📦 Магазин контейнеров: {self._s(acc, 'containers_enabled', False)}", f"tcont:{aid}")],
             [_btn("📦 Какие категории покупать →", f"contcat:{aid}")],
-            [_btn(f"🛠 Автопочинка своих телефонов: {s('auto_repair_enabled', False)}", f"trepair:{aid}")],
-            [_btn(f"🌍 Чужая мастерская, если своей не хватает: {s('repair_external_workshop_enabled', False)}",
-                  f"textworkshop:{aid}")],
+            [_btn("⬅️ Назад", f"autom:{aid}")],
+        ])
+
+    def _autom_repair_menu(self, acc: dict) -> InlineKeyboardMarkup:
+        aid = acc["id"]
+        return InlineKeyboardMarkup([
+            [_btn(f"🛠 Автопочинка своих телефонов: {self._s(acc, 'auto_repair_enabled', False)}", f"trepair:{aid}")],
+            [_btn(f"🌍 Чужая мастерская, если своей не хватает: "
+                  f"{self._s(acc, 'repair_external_workshop_enabled', False)}", f"textworkshop:{aid}")],
             [_btn(f"🌍 Имя чужой мастерской: {acc.get('repair_external_workshop_name') or 'любая свободная'}",
                   f"setworkshop:{aid}")],
-            [_btn(f"📥 Автопринятие чужих заказов: {s('auto_accept_enabled', False)}", f"taccept:{aid}")],
-            [_btn(f"🔧 Обслуживание фермы (снять/починить/вернуть): {s('farm_maintenance_enabled', False)}",
-                  f"tfarmmaint:{aid}")],
-            [_btn(f"🏪 Автозакупка телефонов: {s('phone_shop_enabled', False)}", f"tshop:{aid}")],
+            [_btn(f"📥 Автопринятие чужих заказов: {self._s(acc, 'auto_accept_enabled', False)}", f"taccept:{aid}")],
+            [_btn("⬅️ Назад", f"autom:{aid}")],
+        ])
+
+    def _autom_farm_menu(self, acc: dict) -> InlineKeyboardMarkup:
+        aid = acc["id"]
+        return InlineKeyboardMarkup([
+            [_btn(f"🔧 Обслуживание фермы (снять/починить/вернуть): "
+                  f"{self._s(acc, 'farm_maintenance_enabled', False)}", f"tfarmmaint:{aid}")],
+            [_btn(f"💱 Авто-обмен P-Coins на бирже: {self._s(acc, 'pcoin_exchange_enabled', False)}",
+                  f"texchange:{aid}")],
+            [_btn("⬅️ Назад", f"autom:{aid}")],
+        ])
+
+    def _autom_phoneshop_menu(self, acc: dict) -> InlineKeyboardMarkup:
+        aid = acc["id"]
+        return InlineKeyboardMarkup([
+            [_btn(f"🏪 Автозакупка телефонов: {self._s(acc, 'phone_shop_enabled', False)}", f"tshop:{aid}")],
             [_btn("🏪 Настройки автозакупки телефонов →", f"phoneshop:{aid}")],
-            [_btn("⬅️ Назад", f"farm:{aid}")],
+            [_btn("⬅️ Назад", f"autom:{aid}")],
         ])
 
     def _phone_shop_settings_menu(self, acc: dict) -> InlineKeyboardMarkup:
@@ -251,7 +300,7 @@ class ControlBot:
         return InlineKeyboardMarkup([
             [_btn(f"🏪 Редкость закупки: {acc.get('phone_shop_rarity', 'Ширпотреб')}", f"setrarity:{aid}")],
             [_btn(f"🏪 Кол-во за раз: {qty}", f"setqty:{aid}")],
-            [_btn("⬅️ Назад", f"autom:{aid}")],
+            [_btn("⬅️ Назад", f"autphn:{aid}")],
         ])
 
     def _container_categories_menu(self, acc: dict) -> InlineKeyboardMarkup:
@@ -267,7 +316,7 @@ class ControlBot:
             [_btn(f"Кол-во за ресток: {q('containers_qty_expensive')}", f"setcqe:{aid}")],
             [_btn(f"🎁 Донатный: {s('containers_buy_donation')}", f"tcontd:{aid}")],
             [_btn(f"Кол-во за ресток: {q('containers_qty_donation')}", f"setcqd:{aid}")],
-            [_btn("⬅️ Назад", f"autom:{aid}")],
+            [_btn("⬅️ Назад", f"autcnt:{aid}")],
         ])
 
     def _intervals_menu(self, acc: dict) -> InlineKeyboardMarkup:
@@ -296,6 +345,8 @@ class ControlBot:
             [_btn("💸 Перевести человеку", f"paystart:{aid}")],
             [_btn("🤝 Трейд с человеком", f"tradestart:{aid}")],
         ]
+        if acc.get("pcoin_exchange_enabled", False):
+            rows.append([_btn("💱 Проверить биржу сейчас", f"pcoincheck:{aid}")])
         if not acc.get("autopay_enabled", True):
             rows.append([_btn("💸 Вывести всё", f"payoutall:{aid}")])
         if acc.get("is_main"):
@@ -439,6 +490,24 @@ class ControlBot:
             elif data.startswith("autom:"):
                 await q.message.edit_text(f"⚙️ Автоматизация — <b>{acc.get('name')}</b>",
                                           reply_markup=self._automation_menu(acc))
+            elif data.startswith("autgame:"):
+                await q.message.edit_text(f"🎮 Игровой цикл — <b>{acc.get('name')}</b>",
+                                          reply_markup=self._autom_game_menu(acc))
+            elif data.startswith("autfin:"):
+                await q.message.edit_text(f"💰 Финансы — <b>{acc.get('name')}</b>",
+                                          reply_markup=self._autom_finance_menu(acc))
+            elif data.startswith("autcnt:"):
+                await q.message.edit_text(f"📦 Магазин контейнеров — <b>{acc.get('name')}</b>",
+                                          reply_markup=self._autom_containers_menu(acc))
+            elif data.startswith("autrep:"):
+                await q.message.edit_text(f"🛠 Мастерская (ремонт) — <b>{acc.get('name')}</b>",
+                                          reply_markup=self._autom_repair_menu(acc))
+            elif data.startswith("autfrm:"):
+                await q.message.edit_text(f"🔧 Ферма — <b>{acc.get('name')}</b>",
+                                          reply_markup=self._autom_farm_menu(acc))
+            elif data.startswith("autphn:"):
+                await q.message.edit_text(f"🏪 Магазин телефонов — <b>{acc.get('name')}</b>",
+                                          reply_markup=self._autom_phoneshop_menu(acc))
             elif data.startswith("phoneshop:"):
                 await q.message.edit_text(f"🏪 Настройки автозакупки телефонов — <b>{acc.get('name')}</b>",
                                           reply_markup=self._phone_shop_settings_menu(acc))
@@ -499,19 +568,19 @@ class ControlBot:
             elif data.startswith("tautosend:"):
                 await self._toggle(q, acc, "autosend_enabled", redisplay="autosend")
             elif data.startswith("tcard:"):
-                await self._toggle(q, acc, "card_enabled")
+                await self._toggle(q, acc, "card_enabled", redisplay="autgame")
             elif data.startswith("troul:"):
-                await self._toggle(q, acc, "roulette_enabled")
+                await self._toggle(q, acc, "roulette_enabled", redisplay="autgame")
             elif data.startswith("tmine:"):
-                await self._toggle(q, acc, "mining_enabled")
+                await self._toggle(q, acc, "mining_enabled", redisplay="autgame")
             elif data.startswith("tdaily:"):
-                await self._toggle(q, acc, "daily_reward_enabled")
+                await self._toggle(q, acc, "daily_reward_enabled", redisplay="autgame")
             elif data.startswith("tpay:"):
-                await self._toggle(q, acc, "autopay_enabled")
+                await self._toggle(q, acc, "autopay_enabled", redisplay="autfin")
             elif data.startswith("ttrade:"):
-                await self._toggle(q, acc, "autotrade_enabled")
+                await self._toggle(q, acc, "autotrade_enabled", redisplay="autfin")
             elif data.startswith("tcont:"):
-                await self._toggle(q, acc, "containers_enabled")
+                await self._toggle(q, acc, "containers_enabled", redisplay="autcnt")
             elif data.startswith("contcat:"):
                 await q.message.edit_text(f"📦 Категории контейнеров — <b>{acc.get('name')}</b>",
                                           reply_markup=self._container_categories_menu(acc))
@@ -592,9 +661,9 @@ class ControlBot:
             elif data.startswith("draindo:"):
                 await self._start_drain(q, acc)
             elif data.startswith("trepair:"):
-                await self._toggle(q, acc, "auto_repair_enabled")
+                await self._toggle(q, acc, "auto_repair_enabled", redisplay="autrep")
             elif data.startswith("textworkshop:"):
-                await self._toggle(q, acc, "repair_external_workshop_enabled")
+                await self._toggle(q, acc, "repair_external_workshop_enabled", redisplay="autrep")
             elif data.startswith("setworkshop:"):
                 self._ask(uid, aid, "repair_external_workshop_name")
                 await q.message.edit_text(
@@ -602,11 +671,13 @@ class ControlBot:
                     "при выборе, куда сдать телефон в ремонт). Пришли «-» чтобы очистить — "
                     "тогда при нехватке своего инструмента будет браться первая мастерская из списка:")
             elif data.startswith("taccept:"):
-                await self._toggle(q, acc, "auto_accept_enabled")
+                await self._toggle(q, acc, "auto_accept_enabled", redisplay="autrep")
             elif data.startswith("tfarmmaint:"):
-                await self._toggle(q, acc, "farm_maintenance_enabled")
+                await self._toggle(q, acc, "farm_maintenance_enabled", redisplay="autfrm")
+            elif data.startswith("texchange:"):
+                await self._toggle(q, acc, "pcoin_exchange_enabled", redisplay="autfrm")
             elif data.startswith("tshop:"):
-                await self._toggle(q, acc, "phone_shop_enabled")
+                await self._toggle(q, acc, "phone_shop_enabled", redisplay="autphn")
             elif data.startswith("setrarity:"):
                 self._ask(uid, aid, "phone_shop_rarity")
                 await q.message.edit_text(
@@ -623,6 +694,8 @@ class ControlBot:
                 await self._start_shop_now(q, aid)
             elif data.startswith("upgradeacc:"):
                 await self._start_upgrade_account(q, aid)
+            elif data.startswith("pcoincheck:"):
+                await self._start_dump_pcoins(q, aid)
             elif data.startswith("capgo:"):
                 cat = data.split(":")[2]
                 w = self.manager.workers.get(aid)
@@ -708,7 +781,7 @@ class ControlBot:
             "autotrade_enabled", "containers_enabled",
             "auto_repair_enabled", "auto_accept_enabled", "phone_shop_enabled",
             "msg_alert_enabled", "farm_maintenance_enabled",
-            "repair_external_workshop_enabled",
+            "repair_external_workshop_enabled", "pcoin_exchange_enabled",
         ) else True
         acc[field] = not acc.get(field, default)
         self.storage.save()
@@ -727,7 +800,25 @@ class ControlBot:
             await q.message.edit_text(self._msgacc_text(acc), reply_markup=self._msgacc_menu(acc))
         elif redisplay == "settings":
             await q.message.edit_text(self._settings_text(acc), reply_markup=self._settings_menu(acc))
-        else:  # "automation" — фарм-подтумблеры (карточки/рулетка/майнинг/…)
+        elif redisplay == "autgame":
+            await q.message.edit_text(f"🎮 Игровой цикл — <b>{acc.get('name')}</b>",
+                                      reply_markup=self._autom_game_menu(acc))
+        elif redisplay == "autfin":
+            await q.message.edit_text(f"💰 Финансы — <b>{acc.get('name')}</b>",
+                                      reply_markup=self._autom_finance_menu(acc))
+        elif redisplay == "autcnt":
+            await q.message.edit_text(f"📦 Магазин контейнеров — <b>{acc.get('name')}</b>",
+                                      reply_markup=self._autom_containers_menu(acc))
+        elif redisplay == "autrep":
+            await q.message.edit_text(f"🛠 Мастерская (ремонт) — <b>{acc.get('name')}</b>",
+                                      reply_markup=self._autom_repair_menu(acc))
+        elif redisplay == "autfrm":
+            await q.message.edit_text(f"🔧 Ферма — <b>{acc.get('name')}</b>",
+                                      reply_markup=self._autom_farm_menu(acc))
+        elif redisplay == "autphn":
+            await q.message.edit_text(f"🏪 Магазин телефонов — <b>{acc.get('name')}</b>",
+                                      reply_markup=self._autom_phoneshop_menu(acc))
+        else:  # "automation" — верхний уровень (группы)
             await q.message.edit_text(f"⚙️ Автоматизация — <b>{acc.get('name')}</b>",
                                       reply_markup=self._automation_menu(acc))
 
@@ -891,6 +982,18 @@ class ControlBot:
         acc = self.storage.get(aid)
         await self._safe_edit(q, self._account_text(acc) + f"\n\n🏪 {result}", self._account_menu(acc))
 
+    async def _start_dump_pcoins(self, q: CallbackQuery, aid: int) -> None:
+        w = self.manager.workers.get(aid)
+        if not w or not w.running:
+            return await q.answer("Аккаунт не запущен", show_alert=True)
+        await q.answer("⏳ Пробую биржу...")
+        asyncio.create_task(self._run_dump_pcoins(q, aid, w))
+
+    async def _run_dump_pcoins(self, q: CallbackQuery, aid: int, w) -> None:
+        result = await w.dump_pcoins_now()
+        acc = self.storage.get(aid)
+        await self._safe_edit(q, self._account_text(acc) + f"\n\n💱 {result}", self._actions_menu(acc))
+
     async def _start_upgrade_account(self, q: CallbackQuery, aid: int) -> None:
         w = self.manager.workers.get(aid)
         if not w or not w.running:
@@ -1007,8 +1110,8 @@ class ControlBot:
             acc[field] = "" if val in ("-", "—", "нет") else val
             self.storage.save()
             self.states.pop(uid, None)
-            await m.reply(f"⚙️ Автоматизация — <b>{acc.get('name')}</b>",
-                          reply_markup=self._automation_menu(acc))
+            await m.reply(f"🛠 Мастерская (ремонт) — <b>{acc.get('name')}</b>",
+                          reply_markup=self._autom_repair_menu(acc))
             return
         elif field == "phone_shop_rarity":
             if not val:
@@ -1037,8 +1140,8 @@ class ControlBot:
             acc[field] = int(val)
             self.storage.save()
             self.states.pop(uid, None)
-            await m.reply(f"⚙️ Автоматизация — <b>{acc.get('name')}</b>",
-                          reply_markup=self._automation_menu(acc))
+            await m.reply(f"💰 Финансы — <b>{acc.get('name')}</b>",
+                          reply_markup=self._autom_finance_menu(acc))
             return
         elif field == "mining_time":
             mt = re.match(r"^\s*(\d{1,2})[:.\s](\d{1,2})\s*$", val)

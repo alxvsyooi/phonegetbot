@@ -82,6 +82,7 @@ class _WorkerBase:
         self.shop_next_ts = now
         self.repair_next_ts = now
         self.farm_maintenance_next_ts = now
+        self.pcoin_exchange_next_ts = now
         self.status = "остановлен"
         self.last_card = "—"
         self.last_roulette = "—"
@@ -96,6 +97,7 @@ class _WorkerBase:
         self.last_upgrade = "—"
         self.last_accept = "—"
         self.last_farm_maintenance = "—"
+        self.last_pcoin_exchange = "—"
 
     # ---------- свойства ----------
     @property

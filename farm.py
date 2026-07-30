@@ -21,6 +21,7 @@ from storage import (
     BALANCE_WORD, PAY_CONFIRM_BUTTON, CONTAINER_WORD,
     DAILY_REWARD_WORD, DAILY_REWARD_BUTTON,
     UPGRADE_WORD, UPGRADE_CATEGORIES, UPGRADE_MAX_MARKER, UPGRADE_BUY_BUTTON, UPGRADE_RESERVE,
+    EXCHANGE_WORD,
 )
 from common import MSK, parse_hhmm, fmt_duration, clock, today_msk
 
@@ -86,9 +87,11 @@ def parse_farm_balance(text: str | None) -> tuple[float, int] | None:
 
 
 # после обновления игры у фермы появился персистентный тумблер вкл/выкл
-# («Состояние: Включена/Выключена» + кнопка «Выключить»/«Включить») — по
-# умолчанию НОВАЯ ферма выключена и не майнит, пока её не включат вручную
-_FARM_STATE_RE = re.compile(r"состояние:\s*(включена|выключена)", re.IGNORECASE)
+# («Состояние: ▶️ Включена»/«⏸ Выключена» + кнопка «Выключить»/«Включить») — по
+# умолчанию НОВАЯ ферма выключена и не майнит, пока её не включат вручную.
+# Между «Состояние:» и словом бот вставляет эмодзи-иконку (не просто пробел) -
+# regex с одним \s* её живьём не поймал, отсюда [^\w]* (любые не-буквенные символы)
+_FARM_STATE_RE = re.compile(r"состояние:[^\w]*(включена|выключена)", re.IGNORECASE)
 
 
 def parse_farm_state(text: str | None) -> str | None:
@@ -323,6 +326,7 @@ class FarmModule:
             self._autopay_loop(), self._autotrade_loop(),
             self._container_loop(),
             self._farm_maintenance_loop(),
+            self._pcoin_exchange_loop(),
         ]
 
     def _farm_active(self) -> bool:
@@ -536,6 +540,30 @@ class FarmModule:
             except Exception as e:  # noqa: BLE001
                 self.last_container = f"ошибка: {e}"
                 self.container_next_ts = time.time() + 60
+                await asyncio.sleep(5)
+
+    # ---------- биржа P-Coins -> ТОчки (на будущее, см. dump_pcoins_now) ----------
+    async def _pcoin_exchange_loop(self) -> None:
+        while self.running:
+            try:
+                if (
+                    self._trade_mode or not self._farm_active()
+                    or not self.account.get("pcoin_exchange_enabled", False)
+                ):
+                    await asyncio.sleep(30)
+                    continue
+                now = time.time()
+                if now < self.pcoin_exchange_next_ts:
+                    await asyncio.sleep(min(30, self.pcoin_exchange_next_ts - now))
+                    continue
+                await self.dump_pcoins_now()
+                interval = max(60, int(self.account.get("pcoin_exchange_interval", 14400)))
+                self.pcoin_exchange_next_ts = time.time() + interval
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                self.last_pcoin_exchange = f"ошибка: {e}"
+                self.pcoin_exchange_next_ts = time.time() + 300
                 await asyncio.sleep(5)
 
     def _classify_shop_reply(self, cfg: dict, reply, text: str | None) -> str:
@@ -1197,6 +1225,52 @@ class FarmModule:
         except Exception as e:  # noqa: BLE001
             self.last_mining = f"ошибка: {e}"
             return False
+
+    async def dump_pcoins_now(self) -> str:
+        """💱 Пробует открыть биржу («/texchanger») для обмена P-Coins на
+        ТОчки. На момент написания игра ещё НЕ отвечает на эту команду (проверено
+        живьём несколько раз, включая просто текст «Биржа») — реального экрана
+        обмена никто не видел, поэтому кликать по кнопкам вслепую нельзя (как и
+        везде в этом проекте — см. README). Пока бот молчит, просто фиксируем
+        это в статусе. Если/когда биржа наконец ответит — шлём владельцу её
+        текст алертом (как неопознанный ответ у контейнеров), чтобы разобрать
+        реальные кнопки и дописать автоматизацию, а не гадать с первого раза."""
+        if not self.client or not self.running:
+            self.last_pcoin_exchange = "аккаунт не запущен"
+            return self.last_pcoin_exchange
+        if self._trade_mode:
+            self.last_pcoin_exchange = "идёт трейд — попробуй чуть позже"
+            return self.last_pcoin_exchange
+        try:
+            reply = await self._send_and_wait(CARDS_BOT, EXCHANGE_WORD, timeout=15)
+            if reply is None:
+                self.last_pcoin_exchange = (
+                    f"⚠️ биржа ({EXCHANGE_WORD}) не отвечает — похоже, фичи ещё нет в игре ({clock()})"
+                )
+                return self.last_pcoin_exchange
+            text = _msg_text(reply)
+            self.last_pcoin_exchange = f"🆕 биржа ОТВЕТИЛА! Нужно разобрать вручную ({clock()}): {text[:200]}"
+            await self._notify_owner_exchange_appeared(text)
+            return self.last_pcoin_exchange
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            self.last_pcoin_exchange = f"ошибка: {e}"
+            return self.last_pcoin_exchange
+
+    async def _notify_owner_exchange_appeared(self, text: str) -> None:
+        owner_id = self.account.get("owner_id")
+        if not owner_id or not self.account.get("alerts_enabled", True) or not self.alert_fn:
+            return
+        msg = (
+            f"🆕 Биржа P-Coins — «{self.name}»: команда {EXCHANGE_WORD} наконец ответила! "
+            f"Автоматика пока не умеет ей пользоваться (никто не видел экран) — "
+            f"перешли этот текст в чат «Баги FCC», чтобы дописать автоматизацию:\n\n«{text[:500]}»"
+        )
+        try:
+            await self.alert_fn(owner_id, msg, None)
+        except Exception as e:  # noqa: BLE001
+            print(f"[{self.name}] не удалось отправить алерт о бирже: {e}")
 
     async def collect_daily_reward(self) -> bool:
         """«Ежедневная награда» -> «Забрать». True при успехе. Собирается вместе

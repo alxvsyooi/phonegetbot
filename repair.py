@@ -58,6 +58,36 @@ def _first_nonempty_category(message) -> str | None:
     return None
 
 
+def _nonempty_categories(message) -> list[str]:
+    """Как _first_nonempty_category, но ВСЕ непустые категории по порядку —
+    нужно для приоритетного поиска модели по всем категориям, не только первой."""
+    out = []
+    for t in _all_buttons(message):
+        m = _COUNT_RE.search(t.strip())
+        if m and int(m.group(1)) > 0:
+            out.append(t)
+    return out
+
+
+def _priority_model_button(message, priority: set[str]) -> str | None:
+    """Кнопка модели («Model (xN)»), чьё имя (без суффикса количества) совпадает
+    с одной из priority — моделей, которые сейчас нужны ферме (см.
+    _repair_priority_models)."""
+    skip = ("назад", "вернуться")
+    for t in _all_buttons(message):
+        stripped = t.strip()
+        low = stripped.lower()
+        if any(s in low for s in skip):
+            continue
+        m = _MODEL_COUNT_RE.search(stripped)
+        if not m or int(m.group(1)) <= 0:
+            continue
+        name = _MODEL_COUNT_RE.sub("", stripped).strip().lower()
+        if name in priority:
+            return t
+    return None
+
+
 def _first_model_button(message) -> str | None:
     """Внутри категории («Ширпотреб» и т.п.) телефоны сгруппированы по модели —
     кнопки вида «Модель (xN)» (счётчик с «x», в отличие от категорий верхнего
@@ -151,6 +181,48 @@ class RepairModule:
         m = _CAPACITY_RE.search(_msg_text(eq))
         return (int(m.group(1)), int(m.group(2))) if m else None
 
+    # ---------- приоритет: модели, которые сейчас нужны ферме (см. farm.py) ----------
+    def _repair_priority_models(self) -> set[str]:
+        """Модели телефонов, которые сейчас стоят (или должны стоять) в слотах
+        модульной фермы — farm.py/farm_maintenance_now ведёт этот список в
+        account.farm_slot_models при каждом проходе, включая сломанные слоты,
+        ждущие ремонта. Их чиним в первую очередь: пока такой телефон не
+        починен, соответствующий слот фермы простаивает пустым."""
+        slot_models = self.account.get("farm_slot_models") or {}
+        return {str(v).strip().lower() for v in slot_models.values() if v}
+
+    async def _open_broken_categories(self, bot: str, cfg: dict):
+        phones_cmd = cfg.get("my_phones_command") or "Мои телефоны"
+        entry = await self._send_and_wait(bot, phones_cmd, timeout=20)
+        if entry is None:
+            return None
+        broken_btn = _find_button(entry, cfg.get("broken_button", "нерабочие телефоны"))
+        if not broken_btn:
+            return None
+        clicked, cats = await self._click_retry(entry, broken_btn, bot, cfg)
+        return cats if clicked else None
+
+    async def _find_priority_phone_card(self, bot: str, cats_msg, priority: set[str], cfg: dict):
+        """Проходит по ВСЕМ непустым категориям нерабочих телефонов (не только
+        первой) в поисках модели из priority и открывает её карточку. None, если
+        ни в одной категории приоритетной модели не нашлось — тогда repair_now()
+        падает обратно на обычный порядок «первая категория -> первая модель»."""
+        for cat_label in _nonempty_categories(cats_msg):
+            clicked, models_msg = await self._click_retry(cats_msg, cat_label, bot, cfg)
+            if not clicked or models_msg is None:
+                continue
+            model_btn = _priority_model_button(models_msg, priority)
+            if model_btn:
+                clicked, phone_card = await self._click_retry(models_msg, model_btn, bot, cfg)
+                if clicked and phone_card is not None:
+                    return phone_card
+            back_btn = _find_button(models_msg, "назад") or _find_button(models_msg, "вернуться")
+            if back_btn:
+                clicked, back_msg = await self._click_retry(models_msg, back_btn, bot, cfg)
+                if clicked and back_msg is not None:
+                    cats_msg = back_msg
+        return None
+
     # ---------- автопочинка своих нерабочих телефонов ----------
     def _repair_active(self) -> bool:
         return self.account.get("enabled", True) and self.account.get("auto_repair_enabled", False)
@@ -176,10 +248,13 @@ class RepairModule:
                 await asyncio.sleep(5)
 
     async def repair_now(self) -> str:
-        """Найти первый нерабочий телефон с ещё не отданной в ремонт поломкой и
-        отдать её в ремонт СВОИМ оборудованием (только «В своей мастерской
-        (Бесплатно)» — чужие мастерские не трогаем). Используется циклом и
-        кнопкой «🛠 Почистить нерабочие сейчас»."""
+        """Найти нерабочий телефон и отдать его поломку в ремонт СВОИМ
+        оборудованием (только «В своей мастерской (Бесплатно)» — чужие
+        мастерские не трогаем). В первую очередь ищет модели, которые сейчас
+        нужны ферме (см. _repair_priority_models) — по ВСЕМ категориям, не
+        только первой попавшейся — а не найдя ни одной, падает на обычный
+        порядок «первая непустая категория -> первая модель». Используется
+        циклом и кнопкой «🛠 Почистить нерабочие сейчас»."""
         if not self.client or not self.running:
             self.last_repair = "аккаунт не запущен"
             return self.last_repair
@@ -194,42 +269,50 @@ class RepairModule:
                 self.last_repair = f"⏸ мастерская занята ({cap[0]}/{cap[1]}), пропускаю ({clock()})"
                 return self.last_repair
 
-            phones_cmd = cfg.get("my_phones_command") or "Мои телефоны"
-            entry = await self._send_and_wait(bot, phones_cmd, timeout=20)
-            if entry is None:
-                self.last_repair = f"⚠️ нет ответа на «{phones_cmd}» ({clock()})"
-                return self.last_repair
-            broken_btn = _find_button(entry, cfg.get("broken_button", "нерабочие телефоны"))
-            if not broken_btn:
-                self.last_repair = f"⚠️ кнопка нерабочих телефонов не найдена ({clock()})"
-                return self.last_repair
-            clicked, cats = await self._click_retry(entry, broken_btn, bot, cfg)
-            if not clicked or cats is None:
-                self.last_repair = f"⚠️ нет ответа на список категорий ({clock()})"
+            cats = await self._open_broken_categories(bot, cfg)
+            if cats is None:
+                self.last_repair = f"⚠️ нет ответа на список категорий нерабочих ({clock()})"
                 return self.last_repair
 
-            cat_btn = _first_nonempty_category(cats)
-            if not cat_btn:
-                self.last_repair = f"✅ нерабочих телефонов нет ({clock()} {today_msk()})"
-                return self.last_repair
-            clicked, phone_card = await self._click_retry(cats, cat_btn, bot, cfg)
-            if not clicked or phone_card is None:
-                self.last_repair = f"⚠️ нет ответа при открытии категории ({clock()})"
-                return self.last_repair
+            phone_card = None
+            priority_label = None
+            priority = self._repair_priority_models()
+            if priority:
+                phone_card = await self._find_priority_phone_card(bot, cats, priority, cfg)
+                if phone_card is not None:
+                    priority_label = "🌾 нужен ферме"
+                else:
+                    # категории могли сдвинуться, пока искали приоритетную модель —
+                    # берём список заново перед обычным падением на «первую попавшуюся»
+                    cats = await self._open_broken_categories(bot, cfg)
+                    if cats is None:
+                        self.last_repair = f"⚠️ нет ответа при повторном открытии категорий ({clock()})"
+                        return self.last_repair
 
-            # категория открывает список МОДЕЛЕЙ («Модель (xN)»), а не сразу карточку
-            # ремонта — спускаемся на уровень ниже, если поломок в ответе ещё нет
-            if not _BREAKAGES_RE.search(_msg_text(phone_card)):
-                model_btn = _first_model_button(phone_card)
-                if not model_btn:
-                    self.last_repair = f"⚠️ не нашёл модель в категории «{cat_btn}» ({clock()})"
+            if phone_card is None:
+                cat_btn = _first_nonempty_category(cats)
+                if not cat_btn:
+                    self.last_repair = f"✅ нерабочих телефонов нет ({clock()} {today_msk()})"
                     return self.last_repair
-                clicked, phone_card = await self._click_retry(phone_card, model_btn, bot, cfg)
+                clicked, phone_card = await self._click_retry(cats, cat_btn, bot, cfg)
                 if not clicked or phone_card is None:
-                    self.last_repair = f"⚠️ нет ответа при открытии модели «{model_btn}» ({clock()})"
+                    self.last_repair = f"⚠️ нет ответа при открытии категории ({clock()})"
                     return self.last_repair
 
-            self.last_repair = await self._repair_this_phone(bot, phone_card, cfg)
+                # категория открывает список МОДЕЛЕЙ («Модель (xN)»), а не сразу карточку
+                # ремонта — спускаемся на уровень ниже, если поломок в ответе ещё нет
+                if not _BREAKAGES_RE.search(_msg_text(phone_card)):
+                    model_btn = _first_model_button(phone_card)
+                    if not model_btn:
+                        self.last_repair = f"⚠️ не нашёл модель в категории «{cat_btn}» ({clock()})"
+                        return self.last_repair
+                    clicked, phone_card = await self._click_retry(phone_card, model_btn, bot, cfg)
+                    if not clicked or phone_card is None:
+                        self.last_repair = f"⚠️ нет ответа при открытии модели «{model_btn}» ({clock()})"
+                        return self.last_repair
+
+            result = await self._repair_this_phone(bot, phone_card, cfg)
+            self.last_repair = f"{result} {priority_label}" if priority_label else result
             return self.last_repair
         except asyncio.CancelledError:
             raise
