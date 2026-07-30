@@ -86,6 +86,25 @@ def parse_farm_balance(text: str | None) -> tuple[float, int] | None:
     return (float(m.group(1)), int(m.group(2))) if m else None
 
 
+# «🎒 Ваш портфель: ... 🅿️ P-Coins: 50 ... 💰 ТОчки: 149,325,103» — это единственное
+# место в ответе биржи, где «P-Coins» идёт с двоеточием (курс сверху пишет «1
+# P-Coin = N ТОчек», без двоеточия) — regex не путает эти два случая
+_WALLET_PCOIN_RE = re.compile(r"p-coins:\s*([\d.,\s]+)", re.IGNORECASE)
+
+
+def parse_pcoin_wallet(text: str | None) -> float | None:
+    if not text:
+        return None
+    m = _WALLET_PCOIN_RE.search(text)
+    if not m:
+        return None
+    digits = re.sub(r"[^\d.]", "", m.group(1))
+    try:
+        return float(digits) if digits else None
+    except ValueError:
+        return None
+
+
 # после обновления игры у фермы появился персистентный тумблер вкл/выкл
 # («Состояние: ▶️ Включена»/«⏸ Выключена» + кнопка «Выключить»/«Включить») — по
 # умолчанию НОВАЯ ферма выключена и не майнит, пока её не включат вручную.
@@ -1227,30 +1246,66 @@ class FarmModule:
             return False
 
     async def dump_pcoins_now(self) -> str:
-        """💱 Пробует открыть биржу («/texchanger») для обмена P-Coins на
-        ТОчки. На момент написания игра ещё НЕ отвечает на эту команду (проверено
-        живьём несколько раз, включая просто текст «Биржа») — реального экрана
-        обмена никто не видел, поэтому кликать по кнопкам вслепую нельзя (как и
-        везде в этом проекте — см. README). Пока бот молчит, просто фиксируем
-        это в статусе. Если/когда биржа наконец ответит — шлём владельцу её
-        текст алертом (как неопознанный ответ у контейнеров), чтобы разобрать
-        реальные кнопки и дописать автоматизацию, а не гадать с первого раза."""
+        """💱 Продаёт P-Coins из кошелька на бирже («/texchange») за ТОчки по
+        рыночному курсу (комиссия ~5%, это условие самой игры, не баг). Флоу
+        (проверено вживую): открыть биржу -> клик «Продать» -> бот просит
+        ОТВЕТИТЬ ЧИСЛОМ прямо в чат (не кнопка!) -> экран «ОРДЕР НА ПРОДАЖУ
+        (MARKET)» -> клик «Подтвердить ордер». Продаёт весь кошелёк (сколько
+        P-Coins накопилось после «Снять P-Coins с фермы» — см. collect_mining).
+        Используется циклом (тумблер pcoin_exchange_enabled) и кнопкой «💱
+        Проверить биржу сейчас»."""
         if not self.client or not self.running:
             self.last_pcoin_exchange = "аккаунт не запущен"
             return self.last_pcoin_exchange
         if self._trade_mode:
             self.last_pcoin_exchange = "идёт трейд — попробуй чуть позже"
             return self.last_pcoin_exchange
+        cfg = self.exchange_cfg
+        bot = cfg.get("bot") or CARDS_BOT
+        open_cmd = cfg.get("open_command") or EXCHANGE_WORD
         try:
-            reply = await self._send_and_wait(CARDS_BOT, EXCHANGE_WORD, timeout=15)
-            if reply is None:
-                self.last_pcoin_exchange = (
-                    f"⚠️ биржа ({EXCHANGE_WORD}) не отвечает — похоже, фичи ещё нет в игре ({clock()})"
-                )
+            root = await self._send_and_wait(bot, open_cmd, timeout=15)
+            if root is None:
+                self.last_pcoin_exchange = f"⚠️ биржа ({open_cmd}) не отвечает ({clock()})"
                 return self.last_pcoin_exchange
-            text = _msg_text(reply)
-            self.last_pcoin_exchange = f"🆕 биржа ОТВЕТИЛА! Нужно разобрать вручную ({clock()}): {text[:200]}"
-            await self._notify_owner_exchange_appeared(text)
+
+            wallet = parse_pcoin_wallet(_msg_text(root))
+            if wallet is None:
+                self.last_pcoin_exchange = f"⚠️ не разобрал кошелёк биржи ({clock()})"
+                await self._notify_owner_exchange_unexpected(_msg_text(root))
+                return self.last_pcoin_exchange
+            qty = int(wallet)
+            if qty <= 0:
+                self.last_pcoin_exchange = f"нечего продавать (P-Coins: {wallet:g}) ({clock()})"
+                return self.last_pcoin_exchange
+
+            sell_btn = _find_button(root, cfg.get("sell_button", "продать"))
+            if not sell_btn:
+                self.last_pcoin_exchange = f"⚠️ кнопка «продать» не найдена ({clock()})"
+                return self.last_pcoin_exchange
+            clicked, ask_qty = await self._click_and_wait(root, sell_btn, bot, timeout=15)
+            if not clicked or ask_qty is None:
+                self.last_pcoin_exchange = f"⚠️ нет ответа на «продать» ({clock()})"
+                return self.last_pcoin_exchange
+
+            # бот просит количество ОТВЕТОМ В ЧАТ, а не кнопкой — это ожидаемый шаг
+            # флоу самой игры (проверено вживую), не «текст посреди навигации»
+            order = await self._send_and_wait(bot, str(qty), timeout=15)
+            if order is None:
+                self.last_pcoin_exchange = f"⚠️ нет ответа на количество «{qty}» ({clock()})"
+                return self.last_pcoin_exchange
+            confirm_btn = _find_button(order, cfg.get("confirm_button", "подтвердить ордер"))
+            if not confirm_btn:
+                self.last_pcoin_exchange = f"⚠️ нет кнопки подтверждения ордера ({clock()})"
+                await self._notify_owner_exchange_unexpected(_msg_text(order))
+                return self.last_pcoin_exchange
+            clicked2, done = await self._click_and_wait(order, confirm_btn, bot, timeout=15)
+            if not clicked2:
+                self.last_pcoin_exchange = f"⚠️ ордер продажи не подтвердился ({clock()})"
+                return self.last_pcoin_exchange
+
+            self._bump("pcoin_sold", qty)
+            self.last_pcoin_exchange = f"💱 продано {qty} P-Coin ({clock()} {today_msk()})"
             return self.last_pcoin_exchange
         except asyncio.CancelledError:
             raise
@@ -1258,14 +1313,16 @@ class FarmModule:
             self.last_pcoin_exchange = f"ошибка: {e}"
             return self.last_pcoin_exchange
 
-    async def _notify_owner_exchange_appeared(self, text: str) -> None:
+    async def _notify_owner_exchange_unexpected(self, text: str) -> None:
+        """Биржа ответила чем-то неожиданным (не разобрали кошелёк/нет кнопки
+        подтверждения) — как и с контейнерами, зовём владельца разобраться,
+        вместо того чтобы кликать вслепую."""
         owner_id = self.account.get("owner_id")
         if not owner_id or not self.account.get("alerts_enabled", True) or not self.alert_fn:
             return
         msg = (
-            f"🆕 Биржа P-Coins — «{self.name}»: команда {EXCHANGE_WORD} наконец ответила! "
-            f"Автоматика пока не умеет ей пользоваться (никто не видел экран) — "
-            f"перешли этот текст в чат «Баги FCC», чтобы дописать автоматизацию:\n\n«{text[:500]}»"
+            f"⚠️ Биржа P-Coins — «{self.name}»: неожиданный ответ, проверь вручную:\n\n"
+            f"«{text[:500]}»"
         )
         try:
             await self.alert_fn(owner_id, msg, None)

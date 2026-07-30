@@ -125,6 +125,7 @@ async def main() -> None:
         shop_cfg=settings.get("phone_shop", {}),
         repair_cfg=settings.get("repair", {}),
         farm_maintenance_cfg=settings.get("farm_maintenance", {}),
+        exchange_cfg=settings.get("exchange", {}),
     )
     control = ControlBot(settings, storage, manager)
     manager.bot_app = control.app  # чтобы фарм-воркеры могли слать интерактивные алерты (капча и т.п.)

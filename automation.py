@@ -48,6 +48,7 @@ class _WorkerBase:
         shop_cfg: dict | None = None,
         repair_cfg: dict | None = None,
         farm_maintenance_cfg: dict | None = None,
+        exchange_cfg: dict | None = None,
     ) -> None:
         self.account = account                 # ссылка на словарь из Storage (читаем «вживую»)
         self.storage = storage
@@ -57,6 +58,7 @@ class _WorkerBase:
         self.self_commands_cfg = self_commands_cfg or {}
         self.shop_cfg = shop_cfg or {}
         self.repair_cfg = repair_cfg or {}
+        self.exchange_cfg = exchange_cfg or {}
         self.farm_maintenance_cfg = farm_maintenance_cfg or {}
 
         self.client: Client | None = None

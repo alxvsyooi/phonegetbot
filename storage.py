@@ -34,9 +34,8 @@ FARM_BROKEN_MARKER = "сломан"       # реальный текст бота
 BALANCE_WORD = "такк"               # профиль: «Точки: N», «Телефонов в коллекции: N»
 PAY_CONFIRM_BUTTON = "Подтвердить"
 CONTAINER_WORD = "Магазин контейнеров"
-# биржа P-Coins -> ТОчки, анонсирована апдейтом фермы, но на момент написания
-# не отвечает в игре ни на команду, ни на текст «Биржа» — см. farm.py.dump_pcoins_now
-EXCHANGE_WORD = "/texchanger"
+# биржа P-Coins -> ТОчки (проверено вживую) — см. farm.py.dump_pcoins_now
+EXCHANGE_WORD = "/texchange"
 DAILY_REWARD_WORD = "Ежедневная награда"
 DAILY_REWARD_BUTTON = "Забрать"
 UPGRADE_WORD = "Магазин улучшений"   # 7 категорий, все 6-уровневые (перезарядка/шансы/ферма/лимит)
@@ -181,6 +180,13 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "retry_interval": 5,       # пауза перед повтором клика, если бот принял его, но не ответил
         "retry_attempts": 3,       # сколько раз повторять один и тот же клик перед тем, как сдаться
     },
+    "exchange": {
+        "bot": "phonegetcardsbot",
+        "open_command": "/texchange",      # открывает «Биржа P-Coin» (курс + кнопки Купить/Продать/…)
+        "sell_button": "продать",          # после клика бот просит ОТВЕТИТЬ ЧИСЛОМ (сколько продать) —
+                                            # не кнопка, а обычное текстовое сообщение в чат
+        "confirm_button": "подтвердить ордер",  # на экране «ОРДЕР НА ПРОДАЖУ (MARKET)»
+    },
 }
 
 # поля по умолчанию для нового аккаунта
@@ -242,7 +248,8 @@ ACCOUNT_DEFAULTS: dict[str, Any] = {
 def _empty_stats() -> dict[str, int]:
     return {"phones": 0, "good_phones": 0, "roulette": 0, "mining": 0, "paid": 0,
             "exchanged": 0, "daily": 0, "containers_bought": 0, "shop_bought": 0,
-            "repaired": 0, "accepted_orders": 0, "farm_extracted": 0, "farm_reinstalled": 0}
+            "repaired": 0, "accepted_orders": 0, "farm_extracted": 0, "farm_reinstalled": 0,
+            "pcoin_sold": 0}
 
 
 def _read_json(path: str, default):
