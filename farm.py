@@ -1384,11 +1384,14 @@ class FarmModule:
 
     async def farm_maintenance_now(self) -> str:
         """Обслуживание фермы: для каждого слота со статусом СЛОМАН — «Слот N» ->
-        «Извлечь сломанный» (телефон уходит в «Мои телефоны -> Нерабочие», дальше
-        его подхватит автопочинка). Для каждого пустого слота, чья модель до этого
-        была запомнена (account.farm_slot_models) — «Слот N» -> «Добавить телефон»
-        -> перебор редкостей -> модель по имени -> установка, если рабочий
-        экземпляр этой модели уже найден в инвентаре (т.е. ремонт уже завершился).
+        «Извлечь сломанный» (телефон уходит в «Мои телефоны -> Нерабочие»), и
+        СРАЗУ ЖЕ следом — repair_now() (см. repair.py), который сам находит эту
+        же модель среди нерабочих (по farm_slot_models, записанному чуть выше) и
+        чинит её своим оборудованием — не дожидаясь отдельного цикла автопочинки.
+        Для каждого пустого слота, чья модель до этого была запомнена
+        (account.farm_slot_models) — «Слот N» -> «Добавить телефон» -> перебор
+        редкостей -> модель по имени -> установка, если рабочий экземпляр этой
+        модели уже найден в инвентаре (т.е. ремонт уже завершился).
 
         Игра требует выключенную ферму для установки/извлечения телефона из слота
         («Для установки или извлечения телефона необходимо выключить ферму») —
@@ -1435,6 +1438,7 @@ class FarmModule:
                 powered_off = off_result is not None
 
             extracted: list[str] = []
+            repaired_now: list[str] = []
             for num in broken_nums:
                 fresh = await self._send_and_wait(bot, mining_cmd, timeout=20)
                 if fresh is None:
@@ -1443,6 +1447,11 @@ class FarmModule:
                 if ok:
                     self._bump("farm_extracted")
                     extracted.append(f"№{num} «{model or '?'}»")
+                    # чиним сразу, не дожидаясь отдельного цикла автопочинки — slot_models
+                    # уже записан ВЫШЕ (до извлечения), так что repair_now() сам найдёт
+                    # именно эту модель среди «Мои телефоны -> Нерабочие -> <её категория>»
+                    # (см. _repair_priority_models в repair.py) и починит своим оборудованием
+                    repaired_now.append(f"№{num}: {await self.repair_now()}")
 
             fresh = await self._send_and_wait(bot, mining_cmd, timeout=20)
             empty_nums = (
@@ -1471,7 +1480,9 @@ class FarmModule:
 
             parts = []
             if extracted:
-                parts.append("извлечены (ушли на автопочинку): " + ", ".join(extracted))
+                parts.append("извлечены: " + ", ".join(extracted))
+            if repaired_now:
+                parts.append("отправлены в ремонт сразу же: " + "; ".join(repaired_now))
             if reinstalled:
                 parts.append("возвращены в ферму: " + ", ".join(reinstalled))
             if not parts:
