@@ -1603,6 +1603,47 @@ class FarmModule:
             return True
         return False  # рабочего экземпляра этой модели пока нет (ремонт не завершён)
 
+    async def _execute_pay(self, target: str, amount: int, timeout: int = 15) -> str:
+        """Отправляет «/pay target amount» и доводит перевод до конца.
+
+        Проверено вживую на «слив твинкам»: игра НЕ всегда подтверждает перевод
+        одним сообщением сразу («Вы успешно перевели...») — иногда первым
+        сообщением приходит что-то промежуточное (напр. повторный «такк»/профиль),
+        и только СЛЕДУЮЩИМ — настоящий диалог «Вы уверены, что хотите передать...»
+        с кнопкой «Подтвердить». Старый код брал только первое сообщение после
+        /pay и, не найдя на нём кнопки, сдавался — деньги списывались с исходного
+        аккаунта (промежуточным сообщением), а сам перевод так и зависал
+        неподтверждённым диалогом в чате, который никто не нажимал. Поэтому здесь
+        ждём НЕСКОЛЬКО сообщений подряд (под одним и тем же локом бота, чтобы
+        параллельный цикл не перехватил кнопку подтверждения), пока не найдём
+        либо готовый успех, либо саму кнопку."""
+        if not self.client or not self.running:
+            return "аккаунт не запущен"
+        async with self._lock_for_bot(CARDS_BOT):
+            try:
+                await self.client.send_message(CARDS_BOT, f"/pay {target} {amount}")
+            except Exception as e:  # noqa: BLE001
+                return f"ошибка отправки /pay: {e}"
+            for _ in range(3):
+                fut = self._register_wait(CARDS_BOT)
+                try:
+                    msg = await asyncio.wait_for(fut, timeout)
+                except asyncio.TimeoutError:
+                    self._forget_wait(CARDS_BOT, fut)
+                    return "⚠️ нет ответа на /pay"
+                text = (_msg_text(msg) or "").lower()
+                if "успешно перевел" in text:
+                    self._bump("paid", amount)
+                    return f"✅ переведено {amount} -> {target} ({clock()} {today_msk()})"
+                if _find_button(msg, PAY_CONFIRM_BUTTON):
+                    if await self._try_click(msg, PAY_CONFIRM_BUTTON):
+                        self._bump("paid", amount)
+                        return f"✅ переведено {amount} -> {target} ({clock()} {today_msk()})"
+                    return "⚠️ не удалось нажать «Подтвердить»"
+                # что-то промежуточное (не успех и не диалог подтверждения) — ждём
+                # ещё одно сообщение от бота, не сдаёмся после первого же
+            return "⚠️ не дождался подтверждения /pay за несколько сообщений подряд"
+
     async def _payout(self) -> None:
         """«такк» -> «Точки: N» -> /pay <получатель> N*процент -> Подтвердить.
         Получатель — payout_target, доля — autopay_percent (свои же задают, по
@@ -1647,14 +1688,11 @@ class FarmModule:
         if amount <= 0:
             self.last_payout = f"остаток слишком мал для вывода при {percent}% ({clock()})"
             return self.last_payout
-        pay = await self._send_and_wait(CARDS_BOT, f"/pay {target} {amount}")
-        if await self._try_click(pay, PAY_CONFIRM_BUTTON):
-            self._bump("paid", amount)
-            self.last_payout = f"💸 выведено {amount} ({percent}%) -> {target} ({clock()} {today_msk()})"
-        elif pay is None:
-            self.last_payout = f"⚠️ нет ответа на /pay ({clock()})"
-        else:
-            self.last_payout = f"⚠️ кнопка Подтвердить не найдена ({clock()})"
+        result = await self._execute_pay(target, amount)
+        self.last_payout = (
+            f"💸 выведено {amount} ({percent}%) -> {target} ({clock()} {today_msk()})"
+            if result.startswith("✅") else f"{result} ({clock()})"
+        )
         return self.last_payout
 
     async def manual_pay(self, target: str, amount: int) -> str:
@@ -1669,13 +1707,7 @@ class FarmModule:
         balance = parse_points(getattr(bal, "text", None) or getattr(bal, "caption", None))
         if balance is not None and amount > balance:
             return f"⚠️ не хватает очков (баланс {balance}, запрошено {amount})"
-        pay = await self._send_and_wait(CARDS_BOT, f"/pay {target} {amount}")
-        if await self._try_click(pay, PAY_CONFIRM_BUTTON):
-            self._bump("paid", amount)
-            return f"✅ переведено {amount} -> {target} ({clock()} {today_msk()})"
-        if pay is None:
-            return "⚠️ нет ответа на /pay"
-        return "⚠️ кнопка «Подтвердить» не найдена — возможно перевод не прошёл"
+        return await self._execute_pay(target, amount)
 
     # ---------- инфо для меню ----------
     def card_remaining(self) -> str:
