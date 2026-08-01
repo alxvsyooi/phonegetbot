@@ -342,6 +342,47 @@ class _WorkerBase:
                 self._forget_wait(bot, fut)
                 return True, None
 
+    async def _click_and_wait_for_button(
+        self, message, button_text: str, bot: str, target_button: str,
+        timeout: int = 12, extra_waits: int = 2,
+    ) -> tuple[bool, Any]:
+        """Как _click_and_wait, но если ответ не содержит target_button (напр.
+        «Подтвердить») — не сдаётся сразу, а ждёт ещё до extra_waits следующих
+        сообщений от бота (под тем же локом). Обнаружено вживую на /pay (см.
+        farm.py._execute_pay): игра иногда шлёт промежуточное сообщение ПЕРЕД
+        настоящим диалогом подтверждения, и старый код, беря только первый ответ,
+        решал, что подтверждение не нужно, — а реальный диалог оставался висеть
+        ненажатым. Если у промежуточного сообщения ЕСТЬ какие-то СВОИ кнопки (не
+        target_button) — останавливаемся сразу: это, похоже, другой экран, а не
+        промежуточная заглушка. Возвращает (clicked_target, result) — result это
+        последнее увиденное сообщение, clicked_target — была ли реально нажата
+        target_button."""
+        async with self._lock_for_bot(bot):
+            clicked = await self._try_click(message, button_text)
+            if not clicked:
+                return False, None
+            msg = None
+            for _ in range(1 + max(0, extra_waits)):
+                fut = self._register_wait(bot)
+                try:
+                    msg = await asyncio.wait_for(fut, timeout)
+                except asyncio.TimeoutError:
+                    self._forget_wait(bot, fut)
+                    return False, msg
+                mk = getattr(msg, "reply_markup", None)
+                rows = mk.inline_keyboard if mk and getattr(mk, "inline_keyboard", None) else []
+                btn = next(
+                    (b.text for row in rows for b in row
+                     if target_button.lower() in (getattr(b, "text", "") or "").lower()),
+                    None,
+                )
+                if btn:
+                    ok = await self._try_click(msg, btn)
+                    return ok, msg
+                if rows:
+                    return False, msg  # другой экран с другими кнопками — не промежуточное сообщение
+            return False, msg
+
     # ---------- примитивы режима трейда (использует farm.py / trade.py) ----------
     def enter_trade_mode(self) -> None:
         self._trade_queue = asyncio.Queue()

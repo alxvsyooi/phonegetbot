@@ -233,17 +233,15 @@ class ShopModule:
         if not qty_btn:
             have = ", ".join(_all_buttons(qty_msg)) or "нет кнопок"
             return f"⚠️ «{model_name}»: не нашёл кнопку количества (есть: {have}) ({clock()})"
-        clicked, confirm_msg = await self._click_retry(qty_msg, qty_btn, bot, cfg)
-        if not clicked or confirm_msg is None:
+        # игра иногда шлёт промежуточное сообщение ДО настоящего диалога
+        # подтверждения покупки (обнаружено вживую на /pay, см. farm.py._execute_pay) —
+        # _click_and_wait_for_button не сдаётся, если кнопки нет в первом же ответе
+        clicked_confirm, done = await self._click_and_wait_for_button(
+            qty_msg, qty_btn, bot, confirm_btn, timeout=15)
+        if done is None:
             return f"⚠️ «{model_name}»: нет ответа на выбор количества ({clock()})"
-
-        done = confirm_msg
-        if _find_button(confirm_msg, confirm_btn):
-            clicked, done = await self._click_retry(confirm_msg, confirm_btn, bot, cfg)
-            if not clicked:
-                return f"⚠️ «{model_name}»: не подтвердилась покупка ({clock()})"
-            if done is None:
-                done = confirm_msg
+        if not clicked_confirm and _find_button(done, confirm_btn):
+            return f"⚠️ «{model_name}»: не подтвердилась покупка ({clock()})"
 
         text = (getattr(done, "text", None) or getattr(done, "caption", None) or "") if done else ""
         m = _BUY_CONFIRM_RE.search(text)

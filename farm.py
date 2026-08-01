@@ -951,21 +951,14 @@ class FarmModule:
                         f"не хватает баланса с запасом (цена {_fmt_points(cost)}, запас "
                         f"{_fmt_points(UPGRADE_RESERVE)}, баланс {_fmt_points(balance)})")
                     break
-                clicked2, confirm_msg = await self._click_and_wait(cur, buy_btn, CARDS_BOT, timeout=15)
-                if not clicked2 or confirm_msg is None:
-                    stop_reason = f"клик «{buy_btn}» не дал ответа, стоп"
-                    break
-                # игра теперь переспрашивает подтверждение перед покупкой (раньше
-                # апгрейд срабатывал одним кликом) — жмём «✅ Подтвердить», иначе
-                # застреваем на этом экране и «Улучшить за» больше не найти
-                confirm_btn = _find_button(confirm_msg, "подтвердить")
-                if not confirm_btn:
-                    stop_reason = "нет кнопки подтверждения покупки, стоп"
-                    break
-                clicked3, result_msg = await self._click_and_wait(
-                    confirm_msg, confirm_btn, CARDS_BOT, timeout=15)
+                # игра переспрашивает подтверждение перед покупкой («✅ Подтвердить»),
+                # но иногда сначала шлёт промежуточное сообщение ДО самого диалога
+                # подтверждения (обнаружено вживую на /pay, см. _execute_pay) —
+                # _click_and_wait_for_button не сдаётся после первого же ответа
+                clicked3, result_msg = await self._click_and_wait_for_button(
+                    cur, buy_btn, CARDS_BOT, "подтвердить", timeout=15)
                 if not clicked3 or result_msg is None:
-                    stop_reason = "подтверждение не дало ответа, стоп"
+                    stop_reason = "подтверждение покупки не прошло, стоп"
                     break
                 level_ups += 1
                 spent += cost
