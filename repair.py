@@ -210,6 +210,30 @@ class RepairModule:
         if wake < self.farm_maintenance_next_ts:
             self.farm_maintenance_next_ts = wake
 
+    async def _search_workshop_by_name(self, workshop_pick, ext_name: str, bot: str, cfg: dict):
+        """Использует настоящий поиск игры («🔍 Найти по названию» -> ответить
+        текстом запроса -> «Результаты поиска по запросу...» с кнопками
+        «Мастерская №N») — раньше имя чужой мастерской искалось ПОДСТРОКОЙ только
+        среди кнопок ТЕКУЩЕЙ страницы (из 500+ существующих), поэтому фактически
+        никогда не находилось, если мастерская не попадала на первую страницу
+        случайно (баг «не работает поиск по мастерским»). Возвращает сообщение с
+        инструментами (после клика в первый результат поиска) либо None, если
+        кнопки поиска нет или по запросу ничего не нашлось."""
+        search_btn = _find_button(workshop_pick, cfg.get("workshop_search_button", "найти по названию"))
+        if not search_btn:
+            return None
+        clicked, ask = await self._click_retry(workshop_pick, search_btn, bot, cfg)
+        if not clicked or ask is None:
+            return None
+        results = await self._send_and_wait(bot, ext_name, timeout=15)
+        if results is None:
+            return None
+        result_btn = _find_button(results, cfg.get("workshop_result_button", "мастерская №1"))
+        if not result_btn:
+            return None
+        clicked, tools = await self._click_retry(results, result_btn, bot, cfg)
+        return tools if clicked else None
+
     async def _open_broken_categories(self, bot: str, cfg: dict):
         phones_cmd = cfg.get("my_phones_command") or "Мои телефоны"
         entry = await self._send_and_wait(bot, phones_cmd, timeout=20)
@@ -382,8 +406,11 @@ class RepairModule:
         # мастерской в repair_external_workshop_name (иначе берём первую в списке)
         if self.account.get("repair_external_workshop_enabled", False):
             ext_name = (self.account.get("repair_external_workshop_name") or "").strip()
-            ext_btn = _find_button(workshop_pick, ext_name) if ext_name else None
-            if not ext_btn:
+            tools = None
+            ext_label = ext_name
+            if ext_name:
+                tools = await self._search_workshop_by_name(workshop_pick, ext_name, bot, cfg)
+            if tools is None:
                 nav_skip = ("назад", "вернуться", "найти по названию", "в своей мастерской")
                 ext_btn = next(
                     (t for t in _all_buttons(workshop_pick)
@@ -391,19 +418,20 @@ class RepairModule:
                      and not re.match(r"^\d+\s*/\s*\d+$", t.strip())),
                     None,
                 )
-            if ext_btn:
-                clicked, tools = await self._click_retry(workshop_pick, ext_btn, bot, cfg)
-                if clicked and tools is not None:
-                    start_btn = _find_button(tools, cfg.get("start_repair_button", "начать ремонт"))
-                    if start_btn:
-                        clicked, _started = await self._click_retry(tools, start_btn, bot, cfg)
-                        if clicked:
-                            self._bump("repaired")
-                            self._bump("repaired_external")
-                            self._maybe_speed_up_farm_check(model_name, parse_repair_minutes(_msg_text(tools)))
-                            await self._repair_all_equipment()
-                            return (f"🛠 в ремонте (чужая мастерская «{ext_btn}»): "
-                                    f"«{model_name}» / {breakage_btn} ({clock()} {today_msk()})")
+                ext_label = ext_btn or "первая свободная"
+                if ext_btn:
+                    clicked, tools = await self._click_retry(workshop_pick, ext_btn, bot, cfg)
+            if tools is not None:
+                start_btn = _find_button(tools, cfg.get("start_repair_button", "начать ремонт"))
+                if start_btn:
+                    clicked, _started = await self._click_retry(tools, start_btn, bot, cfg)
+                    if clicked:
+                        self._bump("repaired")
+                        self._bump("repaired_external")
+                        self._maybe_speed_up_farm_check(model_name, parse_repair_minutes(_msg_text(tools)))
+                        await self._repair_all_equipment()
+                        return (f"🛠 в ремонте (чужая мастерская «{ext_label}»): "
+                                f"«{model_name}» / {breakage_btn} ({clock()} {today_msk()})")
             return (f"⚠️ «{model_name}»/«{breakage_btn}»: своего инструмента нет, "
                     f"чужую мастерскую найти/арендовать не удалось ({clock()})")
 
