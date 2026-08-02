@@ -1350,38 +1350,88 @@ class FarmModule:
     def _farm_maintenance_active(self) -> bool:
         return self._farm_active() and self.account.get("farm_maintenance_enabled", False)
 
+    def _farm_maintenance_time_list(self) -> list[str]:
+        """До 2 моментов времени (МСК, «ЧЧ:ММ»), когда запускать обслуживание —
+        см. account.farm_maintenance_times. Список копируется/фильтруется
+        каждый раз заново, а не мутируется на месте (см. предостережение в
+        storage.py про общий объект списка по умолчанию)."""
+        times = self.account.get("farm_maintenance_times") or []
+        if isinstance(times, str):
+            times = [times]
+        return [str(t).strip() for t in times[:2] if str(t).strip()]
+
     async def _farm_maintenance_loop(self) -> None:
-        """Раз в farm_maintenance.check_interval (по умолчанию 4 часа) вызывает
-        farm_maintenance_now(). Сам ремонт извлечённых телефонов делает НЕ этот
-        цикл, а auto_repair_loop (repair.py) — он и так регулярно проверяет «Мои
-        телефоны -> Нерабочие» и чинит своим оборудованием, если тумблер
-        auto_repair_enabled включён у этого же аккаунта."""
+        """Запускает farm_maintenance_now() СТРОГО в заданные пользователем
+        моменты (account.farm_maintenance_times, МСК, до 2 значений в сутки) —
+        не на интервале. Раньше цикл дёргал ферму каждые несколько часов вне
+        зависимости от того, есть ли вообще что делать — а farm_maintenance_now()
+        решала, выключать ли ферму, ДО того как реально проверила, что телефон
+        для установки готов, из-за чего ферму иногда выключали впустую (см.
+        _has_working_phone — теперь проверяет наличие ДО выключения). Сам ремонт
+        извлечённых телефонов делает НЕ этот цикл, а auto_repair_loop (repair.py)."""
+        last_fired: dict[str, object] = {}
         while self.running:
             try:
                 if self._trade_mode or not self._farm_maintenance_active():
                     await asyncio.sleep(30)
                     continue
-                now = time.time()
-                if now < self.farm_maintenance_next_ts:
-                    await asyncio.sleep(min(60, self.farm_maintenance_next_ts - now))
-                    continue
-                await self.farm_maintenance_now()
-                interval = max(300, int(self.farm_maintenance_cfg.get("check_interval", 14400)))
-                self.farm_maintenance_next_ts = time.time() + interval
+                now = datetime.now(MSK)
+                for t in self._farm_maintenance_time_list():
+                    try:
+                        hour, minute = parse_hhmm(t)
+                    except Exception:
+                        continue
+                    if now.hour == hour and now.minute == minute and last_fired.get(t) != now.date():
+                        last_fired[t] = now.date()
+                        await self.farm_maintenance_now()
+                await asyncio.sleep(20)
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
                 self.last_farm_maintenance = f"ошибка: {e}"
-                self.farm_maintenance_next_ts = time.time() + 300
-                await asyncio.sleep(5)
+                await asyncio.sleep(20)
+
+    async def _has_working_phone(self, model_name: str, cfg: dict) -> bool:
+        """Проверяет «Мои телефоны -> Рабочие телефоны -> [редкость] -> модель
+        (xN)» БЕЗ выключения фермы — чтобы решить, стоит ли вообще выключать
+        ферму, ДО того как её выключать (иначе она гаснет впустую, если нужного
+        телефона ещё нет — например, ремонт снятого экземпляра не завершился)."""
+        if not model_name:
+            return False
+        bot = cfg.get("bot") or CARDS_BOT
+        phones_cmd = self.repair_cfg.get("my_phones_command", "Мои телефоны")
+        entry = await self._send_and_wait(bot, phones_cmd, timeout=20)
+        if entry is None:
+            return False
+        working_btn = _find_button(entry, cfg.get("working_phones_button", "рабочие телефоны"))
+        if not working_btn:
+            return False
+        cats = await self._click_step(bot, entry, working_btn, cfg, timeout=15)
+        if cats is None:
+            return False
+        for rarity_label in _RARITY_LABELS:
+            cat_btn = _find_button(cats, rarity_label)
+            if not cat_btn:
+                continue
+            cat_msg = await self._click_step(bot, cats, cat_btn, cfg, timeout=15)
+            if cat_msg is None:
+                continue
+            phone_btn, _page = await self._find_phone_button_across_pages(bot, cat_msg, model_name, cfg)
+            if phone_btn:
+                return True
+        return False
 
     async def farm_maintenance_now(self) -> str:
         """Обслуживание фермы: для каждого слота со статусом СЛОМАН — «Слот N» ->
-        «Извлечь сломанный» (телефон уходит в «Мои телефоны -> Нерабочие»). Для
-        каждого пустого слота, чья модель до этого была запомнена
-        (account.farm_slot_models) — «Слот N» -> «Добавить телефон» -> перебор
-        редкостей -> модель по имени -> установка, если рабочий экземпляр этой
-        модели уже найден в инвентаре (т.е. ремонт уже завершился).
+        «Извлечь сломанный» (телефон уходит в «Мои телефоны -> Нерабочие»),
+        безусловно. Для пустых слотов — сначала (ДО выключения фермы!) решаем,
+        какую модель туда просить (память в account.farm_slot_models важнее —
+        так снятый на ремонт телефон возвращается именно на своё место — иначе
+        account.farm_fill_model) и проверяем через _has_working_phone(), есть ли
+        она реально в инвентаре; выключаем ферму ради установки, только если
+        occupied < account.farm_target_phones И хотя бы для одного пустого слота
+        телефон подтверждённо есть — иначе ферма и так укомплектована
+        достаточно, либо ставить всё равно нечего, трогать её незачем.
 
         Игра требует выключенную ферму для установки/извлечения телефона из слота
         («Для установки или извлечения телефона необходимо выключить ферму») —
@@ -1397,7 +1447,7 @@ class FarmModule:
         Между шагами команда «Тмайнинг» отправляется заново (не идёт «назад» по
         уже открытым меню) — так же, как _buy_containers() между категориями:
         меньше риска зависнуть на устаревшем сообщении, если бот отредактировал
-        его иначе, чем ожидалось. Используется циклом и кнопкой в меню."""
+        его иначе, чем ожидалось. Используется циклом (по расписанию) и кнопкой в меню."""
         if not self.client or not self.running:
             self.last_farm_maintenance = "аккаунт не запущен"
             return self.last_farm_maintenance
@@ -1425,9 +1475,32 @@ class FarmModule:
                     slot_models[str(num)] = info["model"]
 
             broken_nums = sorted(n for n, i in slots.items() if i["status"] == "broken")
-            pending_empty_nums = [
-                n for n, i in slots.items() if i["status"] == "empty" and slot_models.get(str(n))
-            ]
+            empty_nums_all = sorted(n for n, i in slots.items() if i["status"] == "empty")
+            occupied = len(slots) - len(empty_nums_all)
+            target = max(0, int(self.account.get("farm_target_phones", 11)))
+            fill_model = (self.account.get("farm_fill_model") or "").strip()
+
+            # для каждого пустого слота модель-кандидат: своя память важнее общего
+            # fill_model (снятый на ремонт телефон должен вернуться на своё же место)
+            candidate_by_slot: dict[int, str] = {}
+            for n in empty_nums_all:
+                model = slot_models.get(str(n)) or fill_model
+                if model:
+                    candidate_by_slot[n] = model
+
+            # проверяем НАЛИЧИЕ телефона ДО выключения фермы — иначе она гаснет
+            # впустую, если ставить пока нечего (не завершился ремонт и т.п.), а
+            # заодно вообще не трогаем ферму, если она и так укомплектована
+            pending_empty_nums: list[int] = []
+            if occupied < target and candidate_by_slot:
+                availability: dict[str, bool] = {}
+                for n, model in candidate_by_slot.items():
+                    if model not in availability:
+                        availability[model] = await self._has_working_phone(model, cfg)
+                    if availability[model]:
+                        pending_empty_nums.append(n)
+                pending_empty_nums.sort()
+
             if broken_nums or pending_empty_nums:
                 off_result = await self._click_step(bot, root, cfg.get("power_off_button", "выключить"), cfg)
                 powered_off = off_result is not None
@@ -1445,17 +1518,11 @@ class FarmModule:
                     if model:
                         just_extracted_models.append(model)
 
-            fresh = await self._send_and_wait(bot, mining_cmd, timeout=20)
-            empty_nums = (
-                sorted(n for n, i in parse_farm_slots(_msg_text(fresh)).items() if i["status"] == "empty")
-                if fresh is not None else []
-            )
-
             reinstalled: list[str] = []
-            for num in empty_nums:
-                expected = slot_models.get(str(num))
+            for num in pending_empty_nums:
+                expected = candidate_by_slot.get(num)
                 if not expected:
-                    continue  # не знаем, какая модель тут стояла — не гадаем
+                    continue
                 fresh = await self._send_and_wait(bot, mining_cmd, timeout=20)
                 if fresh is None:
                     break
@@ -1494,7 +1561,10 @@ class FarmModule:
             if reinstalled:
                 parts.append("возвращены в ферму: " + ", ".join(reinstalled))
             if not parts:
-                parts.append("сломанных слотов нет, возвращать пока нечего")
+                parts.append(
+                    f"сломанных слотов нет, ферма укомплектована ({occupied}/{target}) "
+                    f"либо пополнять пока нечем"
+                )
             self.last_farm_maintenance = f"🔧 {'; '.join(parts)} ({clock()} {today_msk()})"
             return self.last_farm_maintenance
         except asyncio.CancelledError:

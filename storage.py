@@ -5,6 +5,7 @@ accounts.json — список аккаунтов с их session string и па
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 import threading
@@ -189,9 +190,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "slot_button_prefix": "Слот",       # кнопки «Слот 1».."Слот 12"
         "extract_button": "извлечь сломанный",   # на карточке слота со статусом СЛОМАН
         "add_phone_button": "добавить телефон",  # на карточке пустого слота
+        "working_phones_button": "рабочие телефоны",  # «Мои телефоны» -> сюда, для проверки наличия
+                                                        # ДО выключения фермы (см. farm.py._has_working_phone)
         "next_page_button": "➡",            # пагинация в списке телефонов по редкости
-        "check_interval": 10800,   # раз в 3 часа: снять сломанные -> они уйдут на автопочинку (repair.py) ->
-                                    # уже отремонтированные той же модели вернуть в опустевший слот
+        # запуск СТРОГО по расписанию (account.farm_maintenance_times, МСК) — не по интервалу,
+        # см. docstring farm.py._farm_maintenance_loop
         "power_off_button": "выключить",    # установка/извлечение телефона в слот работает только при
         "power_on_button": "включить",      # выключенной ферме — выключаем перед этим и включаем обратно
         "retry_interval": 5,       # пауза перед повтором клика, если бот принял его, но не ответил
@@ -203,6 +206,21 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "sell_button": "продать",          # после клика бот просит ОТВЕТИТЬ ЧИСЛОМ (сколько продать) —
                                             # не кнопка, а обычное текстовое сообщение в чат
         "confirm_button": "подтвердить ордер",  # на экране «ОРДЕР НА ПРОДАЖУ (MARKET)»
+    },
+    # разовая РУЧНАЯ команда (кнопка в боте, не фоновая автоматизация — так и попросили:
+    # не автоматизировать флип Рыночек-зарешал/Барыга целиком, а просто дать команду
+    # для утомительной части) — выставляет телефон на Авито дороже официальной цены;
+    # купить с другого твинка/чужого игрока владелец делает уже сам вручную в игре.
+    # Флоу проверен вживую: /avito -> «Подать объявление» -> «Телефоны» -> редкость ->
+    # первый телефон -> цена (текст) -> «Пропустить» описание -> «Подтвердить» (текст)
+    "avito": {
+        "bot": "phonegetcardsbot",
+        "open_command": "/avito",
+        "post_button": "подать объявление",
+        "type_phones_button": "телефоны",
+        "rarity": "Ширпотреб",
+        "description_skip_button": "пропустить",
+        "confirm_text": "Подтвердить",
     },
 }
 
@@ -258,14 +276,30 @@ ACCOUNT_DEFAULTS: dict[str, Any] = {
     "auto_review_enabled": False,   # ⭐ автоматически оценивать чужую мастерскую после ремонта (5⭐, без
                                      # комментария) — прогресс к достижению «Критик» (за КОЛИЧЕСТВО отзывов,
                                      # не разовое действие; см. Критик I/II/III — 10/20/50 отзывов)
+    "avito_flip_price": 5000,       # 📢 цена флипа на Авито внутри «Выполнить достижения» —
+                                     # достижения «Рыночек зарешал»/«Барыга» разовые, повторный флип бесполезен
+    "achievements_min_balance": 150000,  # 📜 «Выполнить достижения» не начинает, если баланс «Такк»
+                                          # (ТОчки) ниже этого — грубая подстраховка на будущее (сам флип
+                                          # на Авито бесплатен, но не все возможные будущие шаги здесь тоже)
     "farm_maintenance_enabled": False,  # 🔧 обслуживание фермы: снять сломанные (-> автопочинка) -> вернуть починенные в слот
+    # запускается СТРОГО в эти моменты (МСК), не на интервале — раньше дёргала ферму
+    # каждые несколько часов вне зависимости от того, есть ли вообще что делать, из-за
+    # чего ферму иногда выключали впустую. До 2 значений «ЧЧ:ММ». ВАЖНО: этот список
+    # переприсваивается целиком (никогда не мутируется .append/.remove на месте) —
+    # иначе все аккаунты, ещё не задавшие своё время, разделяли бы один объект списка
+    # (та же ловушка, что и с farm_slot_models, см. комментарий Storage.__init__ ниже)
+    "farm_maintenance_times": ["11:00", "18:00"],
+    "farm_target_phones": 11,       # сколько телефонов должно стоять на ферме одновременно — если уже
+                                     # занято от этого числа, пополнение новыми не запускаем (и ферму не трогаем)
+    "farm_fill_model": "Samsung Galaxy Z TriFold",  # какой моделью пополнять пустые слоты БЕЗ «памяти»
+                                                     # (farm_slot_models) — обычно только что добавленные
     "pcoin_exchange_enabled": False,    # 💱 авто-обмен P-Coins на ТОчки через биржу (пока биржа не отвечает в
                                         # игре — см. farm.py.dump_pcoins_now; тумблер готов на будущее)
     "pcoin_exchange_interval": 14400,   # раз во сколько секунд пробовать биржу, если тумблер включён
-    # ПРИМЕЧАНИЕ: farm_slot_models (номер слота -> модель) НЕ здесь — это dict, а значения
-    # ACCOUNT_DEFAULTS копируются по ССЫЛКЕ при миграции (Storage.__init__/add), общий
-    # мутируемый dict на все аккаунты был бы багом. farm.py заводит его лениво через
-    # self.account.setdefault("farm_slot_models", {}) при первом использовании.
+    # ПРИМЕЧАНИЕ: farm_slot_models (номер слота -> модель) НЕ здесь, хоть Storage теперь
+    # и копирует list/dict-значения ACCOUNT_DEFAULTS (см. Storage.__init__/add) — у него
+    # нет осмысленного дефолта (это персональная память слот->модель), заводится лениво
+    # через self.account.setdefault("farm_slot_models", {}) при первом использовании.
 }
 
 
@@ -273,7 +307,7 @@ def _empty_stats() -> dict[str, int]:
     return {"phones": 0, "good_phones": 0, "roulette": 0, "mining": 0, "paid": 0,
             "exchanged": 0, "daily": 0, "containers_bought": 0, "shop_bought": 0,
             "repaired": 0, "accepted_orders": 0, "farm_extracted": 0, "farm_reinstalled": 0,
-            "pcoin_sold": 0, "reviews_left": 0}
+            "pcoin_sold": 0, "reviews_left": 0, "avito_listed": 0}
 
 
 def _read_json(path: str, default):
@@ -358,7 +392,12 @@ class Storage:
         for acc in self.accounts:
             for k, v in ACCOUNT_DEFAULTS.items():
                 if k not in acc:
-                    acc[k] = v
+                    # list/dict-значения — копией, а не по ссылке: иначе все аккаунты,
+                    # у которых ещё нет своего k, разделяли бы ОДИН И ТОТ ЖЕ объект из
+                    # ACCOUNT_DEFAULTS, и правка одного аккаунта (даже полным
+                    # переприсваиванием — оно бы не спасло, если где-то до этого
+                    # кто-то успел смутировать общий объект на месте) утекла бы во все
+                    acc[k] = copy.deepcopy(v) if isinstance(v, (list, dict)) else v
                     changed = True
             acc.setdefault("stats", _empty_stats())
             acc.setdefault("stats_day", _empty_stats())
@@ -381,7 +420,8 @@ class Storage:
     def add(self, account: dict[str, Any]) -> dict[str, Any]:
         account.setdefault("id", self.next_id())
         for k, v in ACCOUNT_DEFAULTS.items():
-            account.setdefault(k, v)
+            if k not in account:
+                account[k] = copy.deepcopy(v) if isinstance(v, (list, dict)) else v
         account.setdefault("stats", _empty_stats())
         account.setdefault("stats_day", _empty_stats())
         account.setdefault("tasks", [])

@@ -282,9 +282,16 @@ class ControlBot:
 
     def _autom_farm_menu(self, acc: dict) -> InlineKeyboardMarkup:
         aid = acc["id"]
+        times = acc.get("farm_maintenance_times") or []
+        times_label = ", ".join(times) if times else "не задано — не запустится"
         return InlineKeyboardMarkup([
             [_btn(f"🔧 Обслуживание фермы (снять/починить/вернуть): "
                   f"{self._s(acc, 'farm_maintenance_enabled', False)}", f"tfarmmaint:{aid}")],
+            [_btn(f"⏰ Время обслуживания (МСК, до 2х): {times_label}", f"setfarmtimes:{aid}")],
+            [_btn(f"🎯 Целевое число телефонов на ферме: {acc.get('farm_target_phones', 11)}",
+                  f"setfarmtarget:{aid}")],
+            [_btn(f"📱 Модель для пополнения пустых слотов: {acc.get('farm_fill_model') or '—'}",
+                  f"setfarmfill:{aid}")],
             [_btn(f"💱 Авто-обмен P-Coins на бирже: {self._s(acc, 'pcoin_exchange_enabled', False)}",
                   f"texchange:{aid}")],
             [_btn("⬅️ Назад", f"autom:{aid}")],
@@ -345,6 +352,10 @@ class ControlBot:
             [_btn("🛠 Почистить нерабочие сейчас", f"repairnow:{aid}")],
             [_btn("🔧 Обслужить ферму сейчас", f"farmmaintnow:{aid}")],
             [_btn("🏪 Купить телефоны сейчас", f"shopnow:{aid}")],
+            [_btn(f"📜 Выполнить достижения (мин. баланс {acc.get('achievements_min_balance', 150000)})",
+                  f"achieve:{aid}")],
+            [_btn(f"✏️ Цена флипа: {acc.get('avito_flip_price', 5000)}", f"setflipprice:{aid}"),
+             _btn(f"✏️ Мин. баланс: {acc.get('achievements_min_balance', 150000)}", f"setachievemin:{aid}")],
             [_btn("💰 Прокачать аккаунт", f"upgradeacc:{aid}")],
             [_btn("💸 Перевести человеку", f"paystart:{aid}")],
             [_btn("🤝 Трейд с человеком", f"tradestart:{aid}")],
@@ -686,6 +697,22 @@ class ControlBot:
                 await self._toggle(q, acc, "auto_review_enabled", redisplay="autrep")
             elif data.startswith("tfarmmaint:"):
                 await self._toggle(q, acc, "farm_maintenance_enabled", redisplay="autfrm")
+            elif data.startswith("setfarmtimes:"):
+                self._ask(uid, aid, "farm_maintenance_times")
+                await q.message.edit_text(
+                    "⏰ Время(-а) обслуживания фермы, МСК — формат ЧЧ:ММ, можно одно или два через "
+                    "запятую (например «11:00,18:00»). Пришли «-» чтобы очистить — тогда обслуживание "
+                    "не будет запускаться совсем, даже если тумблер включён:")
+            elif data.startswith("setfarmtarget:"):
+                self._ask(uid, aid, "farm_target_phones")
+                await q.message.edit_text(
+                    "🎯 Сколько телефонов должно стоять на ферме одновременно (число) — если уже занято "
+                    "от этого числа, пополнение новыми не запускается и ферму не трогаем:")
+            elif data.startswith("setfarmfill:"):
+                self._ask(uid, aid, "farm_fill_model")
+                await q.message.edit_text(
+                    "📱 Модель для пополнения пустых слотов, у которых ещё нет «памяти» (как называется "
+                    "модель в игре, например «Samsung Galaxy Z TriFold»). Пришли «-» чтобы очистить:")
             elif data.startswith("texchange:"):
                 await self._toggle(q, acc, "pcoin_exchange_enabled", redisplay="autfrm")
             elif data.startswith("tshop:"):
@@ -704,6 +731,19 @@ class ControlBot:
                 await self._start_farm_maintenance_now(q, aid)
             elif data.startswith("shopnow:"):
                 await self._start_shop_now(q, aid)
+            elif data.startswith("achieve:"):
+                await self._start_achievements(q, aid)
+            elif data.startswith("setflipprice:"):
+                self._ask(uid, aid, "avito_flip_price")
+                await q.message.edit_text(
+                    "📢 Цена объявления на Авито (число ТОчек) — должна быть заметно выше официальной/"
+                    "закупочной цены Ширпотреба (по умолчанию 5000), чтобы засчитались "
+                    "«Рыночек зарешал»/«Барыга»:")
+            elif data.startswith("setachievemin:"):
+                self._ask(uid, aid, "achievements_min_balance")
+                await q.message.edit_text(
+                    "📜 Минимальный баланс «Такк» (ТОчки), при котором «Выполнить достижения» вообще "
+                    "запускается (число, по умолчанию 150000):")
             elif data.startswith("upgradeacc:"):
                 await self._start_upgrade_account(q, aid)
             elif data.startswith("pcoincheck:"):
@@ -995,6 +1035,18 @@ class ControlBot:
         acc = self.storage.get(aid)
         await self._safe_edit(q, self._account_text(acc) + f"\n\n🏪 {result}", self._account_menu(acc))
 
+    async def _start_achievements(self, q: CallbackQuery, aid: int) -> None:
+        w = self.manager.workers.get(aid)
+        if not w or not w.running:
+            return await q.answer("Аккаунт не запущен", show_alert=True)
+        await q.answer("⏳ Проверяю баланс и выполняю достижения...")
+        asyncio.create_task(self._run_achievements(q, aid, w))
+
+    async def _run_achievements(self, q: CallbackQuery, aid: int, w) -> None:
+        result = await w.complete_achievements_now()
+        acc = self.storage.get(aid)
+        await self._safe_edit(q, self._account_text(acc) + f"\n\n📜 {result}", self._actions_menu(acc))
+
     async def _start_dump_pcoins(self, q: CallbackQuery, aid: int) -> None:
         w = self.manager.workers.get(aid)
         if not w or not w.running:
@@ -1126,6 +1178,48 @@ class ControlBot:
             self.states.pop(uid, None)
             await m.reply(f"🛠 Мастерская (ремонт) — <b>{acc.get('name')}</b>",
                           reply_markup=self._autom_repair_menu(acc))
+            return
+        elif field == "farm_maintenance_times":
+            if val in ("-", "—", "нет"):
+                acc[field] = []
+            else:
+                parts = [p.strip() for p in re.split(r"[,\s]+", val) if p.strip()]
+                valid = [p for p in parts[:2] if re.match(r"^\d{1,2}:\d{2}$", p)]
+                if not valid:
+                    await m.reply("Нужно время ЧЧ:ММ (МСК), одно или два через запятую — "
+                                  "например «11:00,18:00». Ещё раз:")
+                    return
+                acc[field] = valid
+            self.storage.save()
+            self.states.pop(uid, None)
+            await m.reply(f"🔧 Обслуживание фермы — <b>{acc.get('name')}</b>",
+                          reply_markup=self._autom_farm_menu(acc))
+            return
+        elif field == "farm_target_phones":
+            if not val.isdigit():
+                await m.reply("Нужно число. Ещё раз:")
+                return
+            acc[field] = int(val)
+            self.storage.save()
+            self.states.pop(uid, None)
+            await m.reply(f"🔧 Обслуживание фермы — <b>{acc.get('name')}</b>",
+                          reply_markup=self._autom_farm_menu(acc))
+            return
+        elif field == "farm_fill_model":
+            acc[field] = "" if val in ("-", "—", "нет") else val
+            self.storage.save()
+            self.states.pop(uid, None)
+            await m.reply(f"🔧 Обслуживание фермы — <b>{acc.get('name')}</b>",
+                          reply_markup=self._autom_farm_menu(acc))
+            return
+        elif field in ("avito_flip_price", "achievements_min_balance"):
+            if not val.isdigit() or int(val) <= 0:
+                await m.reply("Нужно положительное число ТОчек. Ещё раз:")
+                return
+            acc[field] = int(val)
+            self.storage.save()
+            self.states.pop(uid, None)
+            await m.reply(f"⚙️ Действия — <b>{acc.get('name')}</b>", reply_markup=self._actions_menu(acc))
             return
         elif field == "phone_shop_rarity":
             if not val:
