@@ -1377,20 +1377,22 @@ class FarmModule:
 
     async def farm_maintenance_now(self) -> str:
         """Обслуживание фермы: для каждого слота со статусом СЛОМАН — «Слот N» ->
-        «Извлечь сломанный» (телефон уходит в «Мои телефоны -> Нерабочие»), и
-        СРАЗУ ЖЕ следом — repair_now() (см. repair.py), который сам находит эту
-        же модель среди нерабочих (по farm_slot_models, записанному чуть выше) и
-        чинит её своим оборудованием — не дожидаясь отдельного цикла автопочинки.
-        Для каждого пустого слота, чья модель до этого была запомнена
+        «Извлечь сломанный» (телефон уходит в «Мои телефоны -> Нерабочие»). Для
+        каждого пустого слота, чья модель до этого была запомнена
         (account.farm_slot_models) — «Слот N» -> «Добавить телефон» -> перебор
         редкостей -> модель по имени -> установка, если рабочий экземпляр этой
         модели уже найден в инвентаре (т.е. ремонт уже завершился).
 
         Игра требует выключенную ферму для установки/извлечения телефона из слота
         («Для установки или извлечения телефона необходимо выключить ферму») —
-        если есть что снимать/ставить, сначала жмём «Выключить», в конце (через
-        finally, даже если по пути была ошибка) возвращаем «Включить», но только
-        если выключали её мы сами (уже выключенную кем-то ещё не трогаем).
+        КРИТИЧНО держать её выключенной СТРОГО на время этих кликов и ни секундой
+        дольше (владелец теряет майнинг за каждый час простоя): сначала жмём
+        «Выключить», снимаем/ставим, и СРАЗУ ЖЕ (ещё до ремонта, не дожидаясь его)
+        возвращаем «Включить» — через finally, даже если по пути была ошибка, но
+        только если выключали её мы сами (уже выключенную кем-то ещё не трогаем).
+        Ремонт снятых телефонов (repair_now(), см. repair.py) идёт ПОСЛЕ, когда
+        ферма уже снова включена — сам ремонт идёт через «Мои телефоны», ему
+        включённость фермы не мешает и не должна её задерживать.
 
         Между шагами команда «Тмайнинг» отправляется заново (не идёт «назад» по
         уже открытым меню) — так же, как _buy_containers() между категориями:
@@ -1431,7 +1433,7 @@ class FarmModule:
                 powered_off = off_result is not None
 
             extracted: list[str] = []
-            repaired_now: list[str] = []
+            just_extracted_models: list[str] = []
             for num in broken_nums:
                 fresh = await self._send_and_wait(bot, mining_cmd, timeout=20)
                 if fresh is None:
@@ -1440,11 +1442,8 @@ class FarmModule:
                 if ok:
                     self._bump("farm_extracted")
                     extracted.append(f"№{num} «{model or '?'}»")
-                    # чиним сразу, не дожидаясь отдельного цикла автопочинки — slot_models
-                    # уже записан ВЫШЕ (до извлечения), так что repair_now() сам найдёт
-                    # именно эту модель среди «Мои телефоны -> Нерабочие -> <её категория>»
-                    # (см. _repair_priority_models в repair.py) и починит своим оборудованием
-                    repaired_now.append(f"№{num}: {await self.repair_now()}")
+                    if model:
+                        just_extracted_models.append(model)
 
             fresh = await self._send_and_wait(bot, mining_cmd, timeout=20)
             empty_nums = (
@@ -1465,17 +1464,33 @@ class FarmModule:
                     self._bump("farm_reinstalled")
                     reinstalled.append(f"№{num} «{expected}»")
 
+            # снятие/установка закончены — возвращаем ферму СРАЗУ, не дожидаясь
+            # ремонта ниже (тот может занять минуты на телефон — навигация,
+            # ретраи), а каждый час простоя фермы стоит владельцу майнинга
+            if powered_off:
+                fresh = await self._send_and_wait(bot, mining_cmd, timeout=20)
+                if fresh is not None:
+                    await self._click_step(bot, fresh, cfg.get("power_on_button", "включить"), cfg)
+                powered_off = False
+
             if self.storage:
                 try:
                     self.storage.save()
                 except Exception:
                     pass
 
+            # теперь (ферма уже снова включена) чиним снятые телефоны — не дожидаясь
+            # отдельного цикла автопочинки; repair_now() сам найдёт именно эти модели
+            # среди «Мои телефоны -> Нерабочие» по farm_slot_models (см. repair.py)
+            repaired_now: list[str] = [
+                f"«{model}»: {await self.repair_now()}" for model in just_extracted_models
+            ]
+
             parts = []
             if extracted:
                 parts.append("извлечены: " + ", ".join(extracted))
             if repaired_now:
-                parts.append("отправлены в ремонт сразу же: " + "; ".join(repaired_now))
+                parts.append("отправлены в ремонт: " + "; ".join(repaired_now))
             if reinstalled:
                 parts.append("возвращены в ферму: " + ", ".join(reinstalled))
             if not parts:
@@ -1488,6 +1503,8 @@ class FarmModule:
             self.last_farm_maintenance = f"ошибка: {e}"
             return self.last_farm_maintenance
         finally:
+            # срабатывает, только если включение выше почему-то не случилось
+            # (ранний return/ошибка ДО того шага) — подстраховка, а не основной путь
             if powered_off:
                 try:
                     fresh = await self._send_and_wait(bot, mining_cmd, timeout=20)
