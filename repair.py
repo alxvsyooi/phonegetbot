@@ -34,6 +34,13 @@ _MODEL_RE = re.compile(r"модель\s*:?\s*(.+)", re.IGNORECASE)
 _BREAKAGES_RE = re.compile(r"поломки\s*:?\s*(.+)", re.IGNORECASE)
 _COUNT_RE = re.compile(r"\((\d+)\)\s*$")
 _MODEL_COUNT_RE = re.compile(r"\(\s*x?\s*(\d+)\s*\)\s*$", re.IGNORECASE)
+# «⏰ Время ремонта: 120 мин.» — на экране выбора инструмента, до старта ремонта
+_DURATION_RE = re.compile(r"время ремонта\s*:?\s*(\d+)\s*мин", re.IGNORECASE)
+
+
+def parse_repair_minutes(text: str | None) -> int | None:
+    m = _DURATION_RE.search(text or "")
+    return int(m.group(1)) if m else None
 
 
 def _all_buttons(message) -> list[str]:
@@ -190,6 +197,18 @@ class RepairModule:
         починен, соответствующий слот фермы простаивает пустым."""
         slot_models = self.account.get("farm_slot_models") or {}
         return {str(v).strip().lower() for v in slot_models.values() if v}
+
+    def _maybe_speed_up_farm_check(self, model_name: str, minutes: int | None) -> None:
+        """Если починенная модель нужна ферме (см. _repair_priority_models) —
+        подгоняет время следующего обслуживания фермы (farm.py) к моменту
+        реального завершения ремонта (+буфер), вместо того чтобы ждать
+        обычный check_interval (по умолчанию часы) — иначе готовый телефон
+        может простаивать в инвентаре лишнее время вместо возврата в слот."""
+        if not minutes or model_name.strip().lower() not in self._repair_priority_models():
+            return
+        wake = time.time() + minutes * 60 + 120  # небольшой буфер
+        if wake < self.farm_maintenance_next_ts:
+            self.farm_maintenance_next_ts = wake
 
     async def _open_broken_categories(self, bot: str, cfg: dict):
         phones_cmd = cfg.get("my_phones_command") or "Мои телефоны"
@@ -353,6 +372,7 @@ class RepairModule:
                     clicked, _started = await self._click_retry(tools, start_btn, bot, cfg)
                     if clicked:
                         self._bump("repaired")
+                        self._maybe_speed_up_farm_check(model_name, parse_repair_minutes(_msg_text(tools)))
                         await self._repair_all_equipment()
                         return f"🛠 в ремонте: «{model_name}» / {breakage_btn} ({clock()} {today_msk()})"
 
@@ -380,6 +400,7 @@ class RepairModule:
                         if clicked:
                             self._bump("repaired")
                             self._bump("repaired_external")
+                            self._maybe_speed_up_farm_check(model_name, parse_repair_minutes(_msg_text(tools)))
                             await self._repair_all_equipment()
                             return (f"🛠 в ремонте (чужая мастерская «{ext_btn}»): "
                                     f"«{model_name}» / {breakage_btn} ({clock()} {today_msk()})")
