@@ -12,13 +12,23 @@
   конкретной мастерской задаётся repair_external_workshop_name (пусто — берём
   первую в списке). После каждого успешно запущенного ремонта (своя или чужая
   мастерская) чиним всё оборудование своей мастерской — инструмент теряет
-  прочность (-3) за использование.
+  прочность (-3) за использование. Конкретную чужую мастерскую можно задать
+  либо владельцем (repair_external_workshop_owner, @username — надёжнее, ищем
+  по общему списку), либо именем (repair_external_workshop_name — родной поиск
+  игры «найти по названию», не всегда находит декорированные эмодзи имена);
+  пусто оба — берём первую свободную из списка.
 - Автопринятие — это про ВХОДЯЩИЕ заказы от других клиентов на ремонт ИХ
   телефонов в твоей мастерской (не путать с автопочинкой своих). Чтобы не
   конкурировать за одно и то же оборудование с автопочинкой по ночам, в тихие
   часы (repair.quiet_start..quiet_end, по умолчанию 22:00–07:00 по Тбилиси)
   автопринятие просто не подтверждает новые заказы — они истекут сами (клиенту
   через час придёт телефон обратно), а не ловятся принудительным отказом.
+- Авто-отзыв (auto_review_enabled) — после завершения ремонта в ЧУЖОЙ
+  мастерской игра проактивно (не в ответ на наш send/click) присылает просьбу
+  оценить работу (1..5⭐ + текстовый комментарий). Ставим фиксированную оценку
+  (review_stars, по умолчанию 5) без комментария (review_comment, по умолчанию
+  «нет») — это прогресс к достижению «Критик» (считает КОЛИЧЕСТВО отзывов, не
+  разовый факт).
 """
 from __future__ import annotations
 
@@ -36,6 +46,9 @@ _COUNT_RE = re.compile(r"\((\d+)\)\s*$")
 _MODEL_COUNT_RE = re.compile(r"\(\s*x?\s*(\d+)\s*\)\s*$", re.IGNORECASE)
 # «⏰ Время ремонта: 120 мин.» — на экране выбора инструмента, до старта ремонта
 _DURATION_RE = re.compile(r"время ремонта\s*:?\s*(\d+)\s*мин", re.IGNORECASE)
+# «1. ⭐ Мастерская «Х» / Владелец: @username / ...» в общем списке чужих мастерских —
+# нежадный захват ДО следующего пункта списка, чтобы не съесть сразу несколько карточек
+_WORKSHOP_OWNER_RE = re.compile(r"(\d+)\.[\s\S]*?владелец\s*:?\s*@(\S+)", re.IGNORECASE)
 
 
 def parse_repair_minutes(text: str | None) -> int | None:
@@ -142,13 +155,43 @@ class RepairModule:
                 await asyncio.sleep(retry_delay)
         return clicked, None
 
-    # ---------- проактивные сообщения (входящие заказы на ремонт) ----------
+    # ---------- проактивные сообщения (входящие заказы на ремонт, оценка мастерской) ----------
     def _is_proactive(self, message) -> bool:
+        text = _msg_text(message).lower()
         marker = (self.repair_cfg.get("request_marker") or "запрос на ремонт телефона").lower()
-        return marker in _msg_text(message).lower()
+        review_marker = (self.repair_cfg.get("review_marker") or "оцените работу мастерской").lower()
+        return marker in text or review_marker in text
 
     async def _handle_proactive(self, message) -> None:
+        review_marker = (self.repair_cfg.get("review_marker") or "оцените работу мастерской").lower()
+        if review_marker in _msg_text(message).lower():
+            await self._maybe_leave_review(message)
+            return
         await self._maybe_accept_order(message)
+
+    async def _maybe_leave_review(self, message) -> None:
+        """Достижение «Критик» считает КОЛИЧЕСТВО отзывов в чужих мастерских (Критик
+        I/II/III — 10/20/50 отзывов), а не разовый факт — проверено вживую. Ставим
+        фиксированную оценку из настроек (по умолчанию 5⭐ без комментария): цель
+        тут прогресс достижения, а не честная оценка чужой мастерской."""
+        if not self.account.get("auto_review_enabled", False):
+            return
+        cfg = self.repair_cfg
+        bot = cfg.get("bot") or CARDS_BOT
+        stars = str(cfg.get("review_stars", "5"))
+        comment = cfg.get("review_comment", "нет")
+        star_btn = _find_button(message, stars)
+        if not star_btn:
+            self.last_repair = f"⚠️ отзыв: не нашёл кнопку «{stars}⭐» ({clock()})"
+            return
+        clicked, ask = await self._click_and_wait(message, star_btn, bot, timeout=15)
+        if not clicked:
+            self.last_repair = f"⚠️ отзыв: не удалось нажать «{stars}⭐» ({clock()})"
+            return
+        if ask is not None:
+            await self._send_and_wait(bot, comment, timeout=15)
+        self._bump("reviews_left")
+        self.last_repair = f"⭐ оставил отзыв ({stars}) в чужой мастерской ({clock()} {today_msk()})"
 
     async def _maybe_accept_order(self, message) -> None:
         cfg = self.repair_cfg
@@ -233,6 +276,34 @@ class RepairModule:
             return None
         clicked, tools = await self._click_retry(results, result_btn, bot, cfg)
         return tools if clicked else None
+
+    async def _find_workshop_by_owner(self, workshop_pick, owner: str, bot: str, cfg: dict):
+        """Листает ОБЩИЙ (несортированный поиском) список чужих мастерских для этой
+        поломки в поисках карточки с «Владелец: @owner» — надёжнее встроенного поиска
+        игры по имени, который не находит мастерские с декорированным эмодзи именем
+        (см. docstring workshop_owner_max_pages в storage.py). Возвращает сообщение с
+        инструментами этой мастерской (после клика по её «Мастерская №N»), либо None,
+        если не нашли за отведённое число страниц."""
+        owner_l = owner.strip().lstrip("@").lower()
+        next_btn_label = cfg.get("next_page_button", "➡")
+        max_pages = max(1, int(cfg.get("workshop_owner_max_pages", 30)))
+        msg = workshop_pick
+        for _ in range(max_pages):
+            for idx, own in _WORKSHOP_OWNER_RE.findall(_msg_text(msg)):
+                if own.lower() == owner_l:
+                    btn = _find_button(msg, f"мастерская №{idx}")
+                    if not btn:
+                        continue
+                    clicked, tools = await self._click_retry(msg, btn, bot, cfg)
+                    return tools if clicked else None
+            nxt = _find_button(msg, next_btn_label)
+            if not nxt:
+                break
+            clicked, nxt_msg = await self._click_retry(msg, nxt, bot, cfg)
+            if not clicked or nxt_msg is None:
+                break
+            msg = nxt_msg
+        return None
 
     async def _open_broken_categories(self, bot: str, cfg: dict):
         phones_cmd = cfg.get("my_phones_command") or "Мои телефоны"
@@ -405,10 +476,15 @@ class RepairModule:
         # repair_external_workshop_enabled, опционально с конкретным именем
         # мастерской в repair_external_workshop_name (иначе берём первую в списке)
         if self.account.get("repair_external_workshop_enabled", False):
+            ext_owner = (self.account.get("repair_external_workshop_owner") or "").strip()
             ext_name = (self.account.get("repair_external_workshop_name") or "").strip()
             tools = None
-            ext_label = ext_name
-            if ext_name:
+            ext_label = ext_owner or ext_name
+            # владелец — приоритетнее и надёжнее (см. _find_workshop_by_owner);
+            # поиск по имени — запасной вариант, если владелец не задан/не найден
+            if ext_owner:
+                tools = await self._find_workshop_by_owner(workshop_pick, ext_owner, bot, cfg)
+            if tools is None and ext_name:
                 tools = await self._search_workshop_by_name(workshop_pick, ext_name, bot, cfg)
             if tools is None:
                 nav_skip = ("назад", "вернуться", "найти по названию", "в своей мастерской")

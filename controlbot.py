@@ -270,9 +270,13 @@ class ControlBot:
             [_btn(f"🛠 Автопочинка своих телефонов: {self._s(acc, 'auto_repair_enabled', False)}", f"trepair:{aid}")],
             [_btn(f"🌍 Чужая мастерская, если своей не хватает: "
                   f"{self._s(acc, 'repair_external_workshop_enabled', False)}", f"textworkshop:{aid}")],
+            [_btn(f"🌍 Владелец чужой мастерской (надёжнее): "
+                  f"{acc.get('repair_external_workshop_owner') or '—'}", f"setworkshopowner:{aid}")],
             [_btn(f"🌍 Имя чужой мастерской: {acc.get('repair_external_workshop_name') or 'любая свободная'}",
                   f"setworkshop:{aid}")],
             [_btn(f"📥 Автопринятие чужих заказов: {self._s(acc, 'auto_accept_enabled', False)}", f"taccept:{aid}")],
+            [_btn(f"⭐ Авто-отзыв после ремонта (Критик): {self._s(acc, 'auto_review_enabled', False)}",
+                  f"treview:{aid}")],
             [_btn("⬅️ Назад", f"autom:{aid}")],
         ])
 
@@ -664,14 +668,22 @@ class ControlBot:
                 await self._toggle(q, acc, "auto_repair_enabled", redisplay="autrep")
             elif data.startswith("textworkshop:"):
                 await self._toggle(q, acc, "repair_external_workshop_enabled", redisplay="autrep")
+            elif data.startswith("setworkshopowner:"):
+                self._ask(uid, aid, "repair_external_workshop_owner")
+                await q.message.edit_text(
+                    "🌍 @username владельца конкретной чужой мастерской — надёжнее имени (ищем по общему "
+                    "списку мастерских, а не встроенным поиском игры, который не всегда находит "
+                    "декорированные эмодзи имена). Пришли «-» чтобы очистить:")
             elif data.startswith("setworkshop:"):
                 self._ask(uid, aid, "repair_external_workshop_name")
                 await q.message.edit_text(
-                    "🌍 Имя/владелец конкретной чужой мастерской (подстрока для поиска в списке "
-                    "при выборе, куда сдать телефон в ремонт). Пришли «-» чтобы очистить — "
-                    "тогда при нехватке своего инструмента будет браться первая мастерская из списка:")
+                    "🌍 Имя конкретной чужой мастерской (поиск игры «найти по названию»). Пришли «-» "
+                    "чтобы очистить — тогда при нехватке своего инструмента (и если владелец выше не "
+                    "задан/не найден) будет браться первая мастерская из списка:")
             elif data.startswith("taccept:"):
                 await self._toggle(q, acc, "auto_accept_enabled", redisplay="autrep")
+            elif data.startswith("treview:"):
+                await self._toggle(q, acc, "auto_review_enabled", redisplay="autrep")
             elif data.startswith("tfarmmaint:"):
                 await self._toggle(q, acc, "farm_maintenance_enabled", redisplay="autfrm")
             elif data.startswith("texchange:"):
@@ -782,6 +794,7 @@ class ControlBot:
             "auto_repair_enabled", "auto_accept_enabled", "phone_shop_enabled",
             "msg_alert_enabled", "farm_maintenance_enabled",
             "repair_external_workshop_enabled", "pcoin_exchange_enabled",
+            "auto_review_enabled",
         ) else True
         acc[field] = not acc.get(field, default)
         self.storage.save()
@@ -1106,7 +1119,8 @@ class ControlBot:
             await m.reply(f"📦 Категории контейнеров — <b>{acc.get('name')}</b>",
                           reply_markup=self._container_categories_menu(acc))
             return
-        elif field == "repair_external_workshop_name":
+        elif field in ("repair_external_workshop_name", "repair_external_workshop_owner"):
+            val = val.lstrip("@") if field == "repair_external_workshop_owner" else val
             acc[field] = "" if val in ("-", "—", "нет") else val
             self.storage.save()
             self.states.pop(uid, None)
