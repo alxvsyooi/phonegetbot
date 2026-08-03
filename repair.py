@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
+from typing import Any
 
 from storage import CARDS_BOT
 from common import clock, today_msk, in_time_window, TBILISI
@@ -43,6 +44,10 @@ _CAPACITY_RE = re.compile(r"занято ремонтом\D*?(\d+)\s*/\s*(\d+)",
 _MODEL_RE = re.compile(r"модель\s*:?\s*(.+)", re.IGNORECASE)
 _BREAKAGES_RE = re.compile(r"поломки\s*:?\s*(.+)", re.IGNORECASE)
 _COUNT_RE = re.compile(r"\((\d+)\)\s*$")
+# «Термоковрик №1 (0 активных запросов)» — сколько сейчас занято у каждого
+# конкретного инструмента мастерской (своей или чужой), для выбора наименее
+# занятого вместо всегда первого
+_TOOL_LOAD_RE = re.compile(r"([^\n(]+?)\s*\((\d+)\s*активн[а-я]*\s*запрос[а-я]*\)", re.IGNORECASE)
 _MODEL_COUNT_RE = re.compile(r"\(\s*x?\s*(\d+)\s*\)\s*$", re.IGNORECASE)
 # «1. ⭐ Мастерская «Х» / Владелец: @username / ...» в общем списке чужих мастерских —
 # нежадный захват ДО следующего пункта списка, чтобы не съесть сразу несколько карточек
@@ -69,6 +74,22 @@ def _first_nonempty_category(message) -> str | None:
         if m and int(m.group(1)) > 0:
             return t
     return None
+
+
+def _pick_least_busy_tool(message) -> str | None:
+    """Среди кнопок конкретных инструментов (не «назад»/«вернуться») выбирает
+    ту, что упомянута в тексте с наименьшим числом «активных запросов» — так
+    заявка не встаёт в очередь к уже занятому инструменту, если рядом есть
+    свободный. Не удалось распарсить загрузку — просто первая доступная кнопка."""
+    text = _msg_text(message)
+    loads = {name.strip().lower(): int(cnt) for name, cnt in _TOOL_LOAD_RE.findall(text)}
+    skip = ("назад", "вернуться")
+    candidates = [t for t in _all_buttons(message) if t.strip() and not any(s in t.lower() for s in skip)]
+    if not candidates:
+        return None
+    if loads:
+        candidates.sort(key=lambda t: loads.get(t.strip().lower(), 0))
+    return candidates[0]
 
 
 def _nonempty_categories(message) -> list[str]:
@@ -186,6 +207,31 @@ class RepairModule:
         self._bump("reviews_left")
         self.last_repair = f"⭐ оставил отзыв ({stars}) в чужой мастерской ({clock()} {today_msk()})"
 
+    async def _start_repair_at_tools(self, tools_msg, bot: str, cfg: dict) -> tuple[bool, Any]:
+        """tools_msg — экран со списком инструментов мастерской (своей или
+        чужой) ПОСЛЕ выбора поломки. Раньше код искал кнопку «Начать ремонт»
+        сразу на этом экране — а у чужой мастерской её там никогда не было
+        (там только кнопки конкретных инструментов вроде «Термоковрик №1»):
+        баг из-за которого внешний ремонт вообще никогда не отправлялся —
+        телефон просто снимался с фермы и оставался висеть без ремонта
+        (репорт пользователя). Настоящий флоу (проверено вживую): выбрать
+        конкретный инструмент -> «Подтвердите запрос» -> «Подтвердить». Если
+        всё же есть прямая «начать ремонт» на этом же экране (возможно, для
+        своей мастерской) — используем её, не усложняя."""
+        direct_start = _find_button(tools_msg, cfg.get("start_repair_button", "начать ремонт"))
+        if direct_start:
+            return await self._click_retry(tools_msg, direct_start, bot, cfg)
+        tool_btn = _pick_least_busy_tool(tools_msg)
+        if not tool_btn:
+            return False, None
+        clicked, confirm_msg = await self._click_retry(tools_msg, tool_btn, bot, cfg)
+        if not clicked or confirm_msg is None:
+            return False, None
+        confirm_btn = _find_button(confirm_msg, cfg.get("repair_confirm_button", "подтвердить"))
+        if not confirm_btn:
+            return False, confirm_msg
+        return await self._click_retry(confirm_msg, confirm_btn, bot, cfg)
+
     async def _maybe_accept_order(self, message) -> None:
         cfg = self.repair_cfg
         if not self.account.get("auto_accept_enabled", False):
@@ -258,20 +304,25 @@ class RepairModule:
         clicked, tools = await self._click_retry(results, result_btn, bot, cfg)
         return tools if clicked else None
 
-    async def _find_workshop_by_owner(self, workshop_pick, owner: str, bot: str, cfg: dict):
+    async def _find_workshop_by_owner(self, workshop_pick, owners: str, bot: str, cfg: dict):
         """Листает ОБЩИЙ (несортированный поиском) список чужих мастерских для этой
         поломки в поисках карточки с «Владелец: @owner» — надёжнее встроенного поиска
         игры по имени, который не находит мастерские с декорированным эмодзи именем
-        (см. docstring workshop_owner_max_pages в storage.py). Возвращает сообщение с
+        (см. docstring workshop_owner_max_pages в storage.py). owners может быть
+        несколькими @username через запятую (напр. если у владельца НЕСКОЛЬКО своих
+        мастерских) — берём первую по счёту найденную (страницы отсортированы по
+        рейтингу, так что это, как правило, лучшая из них). Возвращает сообщение с
         инструментами этой мастерской (после клика по её «Мастерская №N»), либо None,
-        если не нашли за отведённое число страниц."""
-        owner_l = owner.strip().lstrip("@").lower()
+        если ни одна не нашлась за отведённое число страниц."""
+        owner_set = {o.strip().lstrip("@").lower() for o in owners.split(",") if o.strip()}
+        if not owner_set:
+            return None
         next_btn_label = cfg.get("next_page_button", "➡")
         max_pages = max(1, int(cfg.get("workshop_owner_max_pages", 30)))
         msg = workshop_pick
         for _ in range(max_pages):
             for idx, own in _WORKSHOP_OWNER_RE.findall(_msg_text(msg)):
-                if own.lower() == owner_l:
+                if own.lower() in owner_set:
                     btn = _find_button(msg, f"мастерская №{idx}")
                     if not btn:
                         continue
@@ -443,13 +494,11 @@ class RepairModule:
         if own_btn:
             clicked, tools = await self._click_retry(workshop_pick, own_btn, bot, cfg)
             if clicked and tools is not None:
-                start_btn = _find_button(tools, cfg.get("start_repair_button", "начать ремонт"))
-                if start_btn:
-                    clicked, _started = await self._click_retry(tools, start_btn, bot, cfg)
-                    if clicked:
-                        self._bump("repaired")
-                        await self._repair_all_equipment()
-                        return f"🛠 в ремонте: «{model_name}» / {breakage_btn} ({clock()} {today_msk()})"
+                started, _done = await self._start_repair_at_tools(tools, bot, cfg)
+                if started:
+                    self._bump("repaired")
+                    await self._repair_all_equipment()
+                    return f"🛠 в ремонте: «{model_name}» / {breakage_btn} ({clock()} {today_msk()})"
 
         # своего свободного инструмента нет — по умолчанию чужую мастерскую не
         # арендуем (см. docstring модуля); включается тумблером
@@ -478,15 +527,13 @@ class RepairModule:
                 if ext_btn:
                     clicked, tools = await self._click_retry(workshop_pick, ext_btn, bot, cfg)
             if tools is not None:
-                start_btn = _find_button(tools, cfg.get("start_repair_button", "начать ремонт"))
-                if start_btn:
-                    clicked, _started = await self._click_retry(tools, start_btn, bot, cfg)
-                    if clicked:
-                        self._bump("repaired")
-                        self._bump("repaired_external")
-                        await self._repair_all_equipment()
-                        return (f"🛠 в ремонте (чужая мастерская «{ext_label}»): "
-                                f"«{model_name}» / {breakage_btn} ({clock()} {today_msk()})")
+                started, _done = await self._start_repair_at_tools(tools, bot, cfg)
+                if started:
+                    self._bump("repaired")
+                    self._bump("repaired_external")
+                    await self._repair_all_equipment()
+                    return (f"🛠 в ремонте (чужая мастерская «{ext_label}»): "
+                            f"«{model_name}» / {breakage_btn} ({clock()} {today_msk()})")
             return (f"⚠️ «{model_name}»/«{breakage_btn}»: своего инструмента нет, "
                     f"чужую мастерскую найти/арендовать не удалось ({clock()})")
 

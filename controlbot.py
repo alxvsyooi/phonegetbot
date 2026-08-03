@@ -684,7 +684,9 @@ class ControlBot:
                 await q.message.edit_text(
                     "🌍 @username владельца конкретной чужой мастерской — надёжнее имени (ищем по общему "
                     "списку мастерских, а не встроенным поиском игры, который не всегда находит "
-                    "декорированные эмодзи имена). Пришли «-» чтобы очистить:")
+                    "декорированные эмодзи имена). Если своих мастерских несколько — перечисли через "
+                    "запятую (напр. «jstrzw, jstrzw2»), возьмём первую найденную по счёту. Пришли «-» "
+                    "чтобы очистить:")
             elif data.startswith("setworkshop:"):
                 self._ask(uid, aid, "repair_external_workshop_name")
                 await q.message.edit_text(
@@ -1172,7 +1174,8 @@ class ControlBot:
                           reply_markup=self._container_categories_menu(acc))
             return
         elif field in ("repair_external_workshop_name", "repair_external_workshop_owner"):
-            val = val.lstrip("@") if field == "repair_external_workshop_owner" else val
+            if field == "repair_external_workshop_owner" and val not in ("-", "—", "нет"):
+                val = ", ".join(p.strip().lstrip("@") for p in val.split(",") if p.strip())
             acc[field] = "" if val in ("-", "—", "нет") else val
             self.storage.save()
             self.states.pop(uid, None)
