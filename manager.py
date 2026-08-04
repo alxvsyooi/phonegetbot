@@ -185,13 +185,38 @@ class Manager:
         if main and not main.running:
             main = None  # свой аккаунт есть, но не запущен — работаем как с внешним
 
+        # если не нашли «свой» аккаунт под target — раньше это молча превращалось в
+        # SoloTradeSession (ждёт, пока ЧЕЛОВЕК вручную нажмёт «Принять» — а получатель
+        # тоже управляется этим ботом без человека рядом, обмен просто висит до
+        # таймаута, репорт пользователя). Диагностика для самопроверки: показываем, с
+        # какими identifiers своих аккаунтов target НЕ совпал — обычно опечатка/
+        # устаревший @username (см. фикс синхронизации username в automation.py)
+        mismatch_hint = ""
+        if main is None:
+            siblings = [
+                w for w in self.workers.values()
+                if w.account.get("owner_id") == owner and w.id != farm_id
+            ]
+            if siblings:
+                idents = ", ".join(
+                    f"{s.name}=@{s.account.get('username') or '?'}/{s.account.get('tg_id') or '?'}"
+                    for s in siblings
+                )
+                mismatch_hint = (
+                    f" ⚠️ получатель «{target}» не совпал ни с одним своим аккаунтом "
+                    f"({idents}) — если это должен быть свой аккаунт, обмен зависнет "
+                    f"до таймаута (никто не нажмёт «Принять»); проверь username/id"
+                )
+                print(f"[manager] трейд {farm.name} -> «{target}»: {mismatch_hint}")
+
         # блокируем ОБОИХ участников в стабильном порядке (по id) — без этого два
         # обмена с общим участником могут задедлочиться, ожидая друг друга крест-накрест
         lock_ids = sorted({farm.id} | ({main.id} if main else set()))
         async with AsyncExitStack() as stack:
             for lid in lock_ids:
                 await stack.enter_async_context(self._lock_for(lid))
-            return await self._run_trade_passes(farm, main, target)
+            result = await self._run_trade_passes(farm, main, target)
+            return result + mismatch_hint
 
     async def _run_trade_passes(self, farm, main, target: str) -> str:
         from trade import TradeSession, SoloTradeSession

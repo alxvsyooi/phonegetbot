@@ -164,9 +164,15 @@ class _WorkerBase:
 
         try:  # запомним tg_id/username (нужно для трейда и определения владельца)
             me = await self.client.get_me()
-            if self.account.get("tg_id") != me.id or not self.account.get("username"):
+            live_username = me.username or ""
+            # раньше username обновлялся, только если раньше было ПУСТО — если человек
+            # сменил @username в Telegram, сохранённое значение никогда не подтягивалось
+            # заново, и _match_own_worker (см. manager.py) переставал узнавать этот
+            # аккаунт как «свой» у получателей трейда (обмен зависал до таймаута, никто
+            # не нажимал «Принять» — репорт пользователя)
+            if self.account.get("tg_id") != me.id or self.account.get("username") != live_username:
                 self.account["tg_id"] = me.id
-                self.account["username"] = me.username or ""
+                self.account["username"] = live_username
                 if self.storage:
                     self.storage.save()
         except Exception:
