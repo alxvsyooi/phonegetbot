@@ -7,6 +7,8 @@ import asyncio
 import html
 import os
 import re
+import shutil
+import tempfile
 import time
 from typing import Any
 
@@ -116,6 +118,7 @@ class ControlBot:
             crown = "👑 " if acc.get("is_main") else ""
             rows.append([_btn(f"{mark} {crown}{acc.get('name')}", f"acc:{acc['id']}")])
         rows.append([_btn("➕ По номеру", "add_phone"), _btn("➕ Session", "add_session")])
+        rows.append([_btn("➕ Файл сессии", "add_sessionfile")])
         if self._my_accounts(uid):
             rows.append([_btn("☎️ Показать все номера", "allphones")])
         rows.append([_btn("⬅️ Назад", "home")])
@@ -460,12 +463,30 @@ class ControlBot:
                 await q.message.edit_text("📋 <b>Мои аккаунты</b>", reply_markup=self._accounts_menu(uid))
                 return await q.answer()
             if data == "add_phone":
-                self.states[uid] = {"flow": "add", "method": "phone", "step": "api_id", "data": {}}
-                await q.message.edit_text("➕ Добавление по номеру.\nОтправь <b>api_id</b> (my.telegram.org):")
+                self.states[uid] = {
+                    "flow": "add", "method": "phone", "step": "phone",
+                    "data": {"api_id": int(self.settings["api_id"]), "api_hash": self.settings["api_hash"]},
+                }
+                await q.message.edit_text("➕ Добавление по номеру.\nОтправь <b>номер</b> "
+                                          "в формате +79991234567:")
                 return await q.answer()
             if data == "add_session":
-                self.states[uid] = {"flow": "add", "method": "session", "step": "api_id", "data": {}}
-                await q.message.edit_text("➕ Добавление по session string.\nОтправь <b>api_id</b>:")
+                self.states[uid] = {
+                    "flow": "add", "method": "session", "step": "session",
+                    "data": {"api_id": int(self.settings["api_id"]), "api_hash": self.settings["api_hash"]},
+                }
+                await q.message.edit_text("➕ Добавление по session string.\nОтправь <b>session string</b> "
+                                          "(Pyrogram):")
+                return await q.answer()
+            if data == "add_sessionfile":
+                self.states[uid] = {
+                    "flow": "add", "method": "sessionfile", "step": "file",
+                    "data": {"api_id": int(self.settings["api_id"]), "api_hash": self.settings["api_hash"]},
+                }
+                await q.message.edit_text(
+                    "➕ Добавление по файлу сессии (.session).\nПришли сам файл — api_id/api_hash не нужны, "
+                    "используется тот же, что у управляющего бота. Если файл создан под другим api_id, "
+                    "подключение может не сработать (пришлю ошибку) — тогда добавь по session string вручную.")
                 return await q.answer()
             if data == "allphones":
                 await self._start_all_phones(q, uid)
@@ -1464,24 +1485,13 @@ class ControlBot:
         uid = m.from_user.id
         step = state["step"]
         data = state["data"]
-        val = m.text.strip()
+        # шаг "file" ждёт документ, не текст — m.text может быть None, проверяем ДО val=...
+        if step == "file":
+            await self._handle_add_sessionfile(m, state)
+            return
+        val = (m.text or "").strip()
         try:
-            if step == "api_id":
-                if not val.isdigit():
-                    await m.reply("api_id — число. Ещё раз:")
-                    return
-                data["api_id"] = int(val)
-                state["step"] = "api_hash"
-                await m.reply("Теперь <b>api_hash</b>:")
-            elif step == "api_hash":
-                data["api_hash"] = val
-                if state["method"] == "session":
-                    state["step"] = "session"
-                    await m.reply("Отправь <b>session string</b> (Pyrogram):")
-                else:
-                    state["step"] = "phone"
-                    await m.reply("Отправь <b>номер</b> в формате +79991234567:")
-            elif step == "session":
+            if step == "session":
                 data["session_string"] = val
                 await self._finalize_add(m, data)
             elif step == "phone":
@@ -1526,6 +1536,45 @@ class ControlBot:
             await m.reply(f"Ошибка: {e}\nНачни заново: /start")
             await self._cleanup(state)
             self.states.pop(uid, None)
+
+    async def _handle_add_sessionfile(self, m: Message, state: dict) -> None:
+        """Добавление аккаунта загрузкой готового .session файла — api_id/api_hash
+        НЕ спрашиваем, используем те же, что у управляющего бота (settings.json),
+        по просьбе пользователя. Если файл создан под ДРУГИМ api_id — подключение
+        может не пройти (сообщаем ошибку явно, не гадаем дальше)."""
+        uid = m.from_user.id
+        data = state["data"]
+        if not m.document:
+            await m.reply("Нужно прислать именно файл сессии (.session) — как документ, "
+                          "не текст. Ещё раз, либо /start чтобы отменить:")
+            return
+        tmpdir = tempfile.mkdtemp(prefix="sessimport_")
+        sess_name = f"import_{uid}_{int(time.time())}"
+        dest = os.path.join(tmpdir, f"{sess_name}.session")
+        client: Client | None = None
+        try:
+            await m.download(file_name=dest)
+            client = Client(name=sess_name, api_id=data["api_id"], api_hash=data["api_hash"], workdir=tmpdir)
+            await client.connect()
+            me = await client.get_me()
+            data["session_string"] = await client.export_session_string()
+            await client.disconnect()
+            client = None
+            await self._finalize_add(m, data, name=me.username or me.first_name or None)
+        except Exception as e:  # noqa: BLE001
+            await m.reply(
+                f"⚠️ Не удалось подключиться по этому файлу сессии: {e}\n\n"
+                f"Частая причина — файл создан под ДРУГИМ api_id/api_hash, не тем, что у "
+                f"управляющего бота. Тогда добавь аккаунт через «➕ Session» (session string) "
+                f"с тем api_id/hash, под которым файл реально создавался. Начни заново: /start")
+            self.states.pop(uid, None)
+        finally:
+            if client:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     async def _cleanup(self, state: dict) -> None:
         client = state.get("client")
