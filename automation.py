@@ -27,6 +27,7 @@ from farm import FarmModule
 from autosend import AutosendModule
 from shop import ShopModule
 from repair import RepairModule
+from containers_api import ContainersApiModule
 
 # main.py использует эти имена как `from automation import MSK, _parse_hhmm`
 _parse_hhmm = parse_hhmm
@@ -50,6 +51,7 @@ class _WorkerBase:
         farm_maintenance_cfg: dict | None = None,
         exchange_cfg: dict | None = None,
         avito_cfg: dict | None = None,
+        containers_api_cfg: dict | None = None,
     ) -> None:
         self.account = account                 # ссылка на словарь из Storage (читаем «вживую»)
         self.storage = storage
@@ -61,6 +63,7 @@ class _WorkerBase:
         self.repair_cfg = repair_cfg or {}
         self.exchange_cfg = exchange_cfg or {}
         self.farm_maintenance_cfg = farm_maintenance_cfg or {}
+        self.containers_api_cfg = containers_api_cfg or {}
         self.avito_cfg = avito_cfg or {}
 
         self.client: Client | None = None
@@ -103,6 +106,7 @@ class _WorkerBase:
         self.last_farm_maintenance = "—"
         self.last_pcoin_exchange = "—"
         self.last_power_watchdog = "—"
+        self.last_containers_api = "—"
 
     # ---------- свойства ----------
     @property
@@ -465,7 +469,7 @@ class _WorkerBase:
         return fmt_duration(int(rem)) if rem > 0 else ready
 
 
-class AccountWorker(FarmModule, AutosendModule, ShopModule, RepairModule, _WorkerBase):
+class AccountWorker(FarmModule, AutosendModule, ShopModule, RepairModule, ContainersApiModule, _WorkerBase):
     """Полный воркер аккаунта = 🌾 Фарм карточек (farm.py) + 📨 Автоотправка
     (autosend.py) + 🏪 Магазин телефонов (shop.py) + 🛠 Мастерская (repair.py) +
     базовое подключение (этот файл). Модули независимы: каждый включается/

@@ -240,6 +240,22 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "description_skip_button": "пропустить",
         "confirm_text": "Подтвердить",
     },
+    # прямой HTTP к бэкенду мини-аппа магазина контейнеров (см. containers_api.py) —
+    # контейнеры (особенно донатные) разбирают за секунды после рестока, ручные клики
+    # по мини-аппу физически не успевают (проверено вживую)
+    "containers_api": {
+        "bot": "phonegetcardsbot",
+        "open_command": "/tcontainershop",
+        "entry_button": "войти в магазин контейнеров",
+        "base_url": "https://phoneget.duckdns.org",
+        "platform": "web",
+        "poll_far_interval": 1800,     # далеко от рестока — раз во сколько секунд проверять next_supply
+                                        # (каждая проверка — настоящий MTProto RequestSimpleWebView,
+                                        # не стоит дёргать его слишком часто без нужды)
+        "burst_window_seconds": 90,    # за сколько до/после next_supply переходить в плотный опрос
+        "burst_interval": 1.5,         # пауза между попытками купить во время плотного опроса, сек
+        "burst_duration": 90,          # сколько длится один заход плотного опроса, сек
+    },
 }
 
 # поля по умолчанию для нового аккаунта
@@ -271,13 +287,18 @@ ACCOUNT_DEFAULTS: dict[str, Any] = {
     "autopay_interval": 14400,      # раз во сколько секунд авто-вывод очков — независимо от майнинга
     "autotrade_enabled": False,
     "autotrade_interval": 14400,    # раз во сколько секунд авто-трейд (слив телефонов) — независимо от майнинга
-    "containers_enabled": False,
+    "containers_enabled": False,        # СТАРЫЙ путь через чат — теперь мёртв: игра перевела магазин
+                                         # контейнеров на Telegram Mini App, кнопок в чате для покупки
+                                         # больше нет (см. containers_api_enabled — актуальная замена)
     "containers_buy_budget": True,      # 📦 Бюджетный контейнер — покупать при рестоке
     "containers_buy_expensive": True,   # 📦 Дорогой контейнер
     "containers_buy_donation": True,    # 📦 Донатный контейнер
     "containers_qty_budget": 0,         # сколько покупать за ресток, 0 = максимум доступного (игра+баланс)
     "containers_qty_expensive": 0,
     "containers_qty_donation": 0,
+    "containers_api_enabled": False,    # 📦⚡ покупка контейнеров напрямую через HTTP API мини-аппа —
+                                         # успевает за секунды до раскупки, в отличие от кликов по вебвью
+    "containers_api_priority": "donate,expensive,budget",  # порядок типов при покупке
     "alerts_enabled": True,             # 🔔 алерты владельцу (капча, подозр. цена и т.п.) через управляющего бота
     "daily_reward_enabled": True,
     "self_commands_enabled": True,

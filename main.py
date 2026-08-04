@@ -127,6 +127,7 @@ async def main() -> None:
         farm_maintenance_cfg=settings.get("farm_maintenance", {}),
         exchange_cfg=settings.get("exchange", {}),
         avito_cfg=settings.get("avito", {}),
+        containers_api_cfg=settings.get("containers_api", {}),
     )
     control = ControlBot(settings, storage, manager)
     manager.bot_app = control.app  # чтобы фарм-воркеры могли слать интерактивные алерты (капча и т.п.)

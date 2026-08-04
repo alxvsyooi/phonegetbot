@@ -262,8 +262,14 @@ class ControlBot:
     def _autom_containers_menu(self, acc: dict) -> InlineKeyboardMarkup:
         aid = acc["id"]
         return InlineKeyboardMarkup([
-            [_btn(f"📦 Магазин контейнеров: {self._s(acc, 'containers_enabled', False)}", f"tcont:{aid}")],
-            [_btn("📦 Какие категории покупать →", f"contcat:{aid}")],
+            [_btn(f"📦⚡ Покупка через API (актуальное): {self._s(acc, 'containers_api_enabled', False)}",
+                  f"tcontapi:{aid}")],
+            [_btn(f"📦⚡ Приоритет типов: {acc.get('containers_api_priority') or 'donate,expensive,budget'}",
+                  f"setcontapipri:{aid}")],
+            [_btn("📦⚡ Проверить/купить сейчас", f"contapinow:{aid}")],
+            [_btn(f"📦 Старый магазин через чат (мёртв — игра перешла на Mini App): "
+                  f"{self._s(acc, 'containers_enabled', False)}", f"tcont:{aid}")],
+            [_btn("📦 Какие категории покупать (для старого) →", f"contcat:{aid}")],
             [_btn("⬅️ Назад", f"autom:{aid}")],
         ])
 
@@ -621,6 +627,16 @@ class ControlBot:
                 await self._toggle(q, acc, "autotrade_enabled", redisplay="autfin")
             elif data.startswith("tcont:"):
                 await self._toggle(q, acc, "containers_enabled", redisplay="autcnt")
+            elif data.startswith("tcontapi:"):
+                await self._toggle(q, acc, "containers_api_enabled", redisplay="autcnt")
+            elif data.startswith("setcontapipri:"):
+                self._ask(uid, aid, "containers_api_priority")
+                await q.message.edit_text(
+                    "📦⚡ Порядок типов контейнеров при покупке через API, через запятую — "
+                    "например «donate,expensive,budget» (по умолчанию). Допустимые значения: "
+                    "donate, expensive, budget:")
+            elif data.startswith("contapinow:"):
+                await self._start_containers_api(q, aid)
             elif data.startswith("contcat:"):
                 await q.message.edit_text(f"📦 Категории контейнеров — <b>{acc.get('name')}</b>",
                                           reply_markup=self._container_categories_menu(acc))
@@ -873,7 +889,7 @@ class ControlBot:
             "auto_repair_enabled", "auto_accept_enabled", "phone_shop_enabled",
             "msg_alert_enabled", "farm_maintenance_enabled",
             "repair_external_workshop_enabled", "pcoin_exchange_enabled",
-            "auto_review_enabled", "power_watchdog_enabled",
+            "auto_review_enabled", "power_watchdog_enabled", "containers_api_enabled",
         ) else True
         acc[field] = not acc.get(field, default)
         self.storage.save()
@@ -1110,6 +1126,19 @@ class ControlBot:
         acc = self.storage.get(aid)
         await self._safe_edit(q, self._account_text(acc) + f"\n\n⚡ {result}", self._actions_menu(acc))
 
+    async def _start_containers_api(self, q: CallbackQuery, aid: int) -> None:
+        w = self.manager.workers.get(aid)
+        if not w or not w.running:
+            return await q.answer("Аккаунт не запущен", show_alert=True)
+        await q.answer("⏳ Проверяю магазин контейнеров...")
+        asyncio.create_task(self._run_containers_api(q, aid, w))
+
+    async def _run_containers_api(self, q: CallbackQuery, aid: int, w) -> None:
+        result = await w.buy_containers_api_now()
+        acc = self.storage.get(aid)
+        await self._safe_edit(q, self._account_text(acc) + f"\n\n📦 {result}",
+                              self._autom_containers_menu(acc))
+
     async def _start_upgrade_account(self, q: CallbackQuery, aid: int) -> None:
         w = self.manager.workers.get(aid)
         if not w or not w.running:
@@ -1236,6 +1265,18 @@ class ControlBot:
             self.states.pop(uid, None)
             await m.reply(f"🛠 Мастерская (ремонт) — <b>{acc.get('name')}</b>",
                           reply_markup=self._autom_repair_menu(acc))
+            return
+        elif field == "containers_api_priority":
+            parts = [p.strip().lower() for p in val.split(",") if p.strip()]
+            valid = [p for p in parts if p in ("donate", "expensive", "budget")]
+            if not valid:
+                await m.reply("Нужны значения donate/expensive/budget через запятую. Ещё раз:")
+                return
+            acc[field] = ",".join(valid)
+            self.storage.save()
+            self.states.pop(uid, None)
+            await m.reply(f"📦 Магазин контейнеров — <b>{acc.get('name')}</b>",
+                          reply_markup=self._autom_containers_menu(acc))
             return
         elif field == "farm_maintenance_times":
             if val in ("-", "—", "нет"):
