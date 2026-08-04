@@ -294,6 +294,9 @@ class ControlBot:
                   f"setfarmfill:{aid}")],
             [_btn(f"💱 Авто-обмен P-Coins на бирже: {self._s(acc, 'pcoin_exchange_enabled', False)}",
                   f"texchange:{aid}")],
+            [_btn(f"⚡ Аварийный сброс перегрузки питания: {self._s(acc, 'power_watchdog_enabled', False)}",
+                  f"tpowerwatch:{aid}")],
+            [_btn(f"⚡ Проверять раз в: {acc.get('power_watchdog_interval', 300)}с", f"setpowerwatch:{aid}")],
             [_btn("⬅️ Назад", f"autom:{aid}")],
         ])
 
@@ -335,8 +338,8 @@ class ControlBot:
         return InlineKeyboardMarkup([
             [_btn(f"⏱ Карточки: {acc.get('card_interval', 3600)}с", f"setcard:{aid}")],
             [_btn(f"⏱ Рулетка: {acc.get('roulette_interval', 3600)}с", f"setroul:{aid}")],
-            [_btn(f"⛏ Майнинг — проверять раз в: {acc.get('mining_check_interval_minutes', 240)} мин",
-                  f"setmininterval:{aid}")],
+            [_btn(f"⛏ Майнинг — проверять в (МСК): "
+                  f"{', '.join(acc.get('mining_check_times') or []) or 'не задано'}", f"setmininterval:{aid}")],
             [_btn(f"🎁 Ежедневная награда (МСК): {acc.get('mining_time', '01:00')}", f"setmtime:{aid}")],
             [_btn(f"💸 Авто-вывод — раз в: {acc.get('autopay_interval', 14400)}с", f"setpayinterval:{aid}")],
             [_btn(f"🤝 Авто-трейд — раз в: {acc.get('autotrade_interval', 14400)}с", f"settradeinterval:{aid}")],
@@ -362,6 +365,7 @@ class ControlBot:
         ]
         if acc.get("pcoin_exchange_enabled", False):
             rows.append([_btn("💱 Проверить биржу сейчас", f"pcoincheck:{aid}")])
+        rows.append([_btn("⚡ Проверить перегрузку сейчас", f"powerwatchnow:{aid}")])
         if not acc.get("autopay_enabled", True):
             rows.append([_btn("💸 Вывести всё", f"payoutall:{aid}")])
         if acc.get("is_main"):
@@ -623,9 +627,12 @@ class ControlBot:
                 self._ask(uid, aid, "roulette_interval")
                 await q.message.edit_text("Отправь интервал рулетки в секундах (>=10):")
             elif data.startswith("setmininterval:"):
-                self._ask(uid, aid, "mining_check_interval_minutes")
+                self._ask(uid, aid, "mining_check_times")
                 await q.message.edit_text(
-                    "Отправь раз во сколько минут проверять/собирать майнинг (число, >=1):"
+                    "⛏ Время(-а) проверки/сбора майнинга, МСК — формат ЧЧ:ММ, можно несколько через "
+                    "запятую (например «01:00,09:00,17:00»). Не на интервале — из-за случайных «Событий» "
+                    "на ферме (может увести в аварийную перегрузку) предсказуемые моменты проверки лучше "
+                    "частого слепого опроса. Пришли «-» чтобы очистить (тогда проверка не будет запускаться):"
                 )
             elif data.startswith("setmtime:"):
                 self._ask(uid, aid, "mining_time")
@@ -717,6 +724,13 @@ class ControlBot:
                     "модель в игре, например «Samsung Galaxy Z TriFold»). Пришли «-» чтобы очистить:")
             elif data.startswith("texchange:"):
                 await self._toggle(q, acc, "pcoin_exchange_enabled", redisplay="autfrm")
+            elif data.startswith("tpowerwatch:"):
+                await self._toggle(q, acc, "power_watchdog_enabled", redisplay="autfrm")
+            elif data.startswith("setpowerwatch:"):
+                self._ask(uid, aid, "power_watchdog_interval")
+                await q.message.edit_text(
+                    "⚡ Раз во сколько секунд проверять питание/охлаждение фермы на аварийную "
+                    "перегрузку (число, >=60):")
             elif data.startswith("tshop:"):
                 await self._toggle(q, acc, "phone_shop_enabled", redisplay="autphn")
             elif data.startswith("setrarity:"):
@@ -750,6 +764,8 @@ class ControlBot:
                 await self._start_upgrade_account(q, aid)
             elif data.startswith("pcoincheck:"):
                 await self._start_dump_pcoins(q, aid)
+            elif data.startswith("powerwatchnow:"):
+                await self._start_power_watchdog(q, aid)
             elif data.startswith("capgo:"):
                 cat = data.split(":")[2]
                 w = self.manager.workers.get(aid)
@@ -836,7 +852,7 @@ class ControlBot:
             "auto_repair_enabled", "auto_accept_enabled", "phone_shop_enabled",
             "msg_alert_enabled", "farm_maintenance_enabled",
             "repair_external_workshop_enabled", "pcoin_exchange_enabled",
-            "auto_review_enabled",
+            "auto_review_enabled", "power_watchdog_enabled",
         ) else True
         acc[field] = not acc.get(field, default)
         self.storage.save()
@@ -1061,6 +1077,18 @@ class ControlBot:
         acc = self.storage.get(aid)
         await self._safe_edit(q, self._account_text(acc) + f"\n\n💱 {result}", self._actions_menu(acc))
 
+    async def _start_power_watchdog(self, q: CallbackQuery, aid: int) -> None:
+        w = self.manager.workers.get(aid)
+        if not w or not w.running:
+            return await q.answer("Аккаунт не запущен", show_alert=True)
+        await q.answer("⏳ Проверяю питание/охлаждение...")
+        asyncio.create_task(self._run_power_watchdog(q, aid, w))
+
+    async def _run_power_watchdog(self, q: CallbackQuery, aid: int, w) -> None:
+        result = await w.relieve_overload_now()
+        acc = self.storage.get(aid)
+        await self._safe_edit(q, self._account_text(acc) + f"\n\n⚡ {result}", self._actions_menu(acc))
+
     async def _start_upgrade_account(self, q: CallbackQuery, aid: int) -> None:
         w = self.manager.workers.get(aid)
         if not w or not w.running:
@@ -1149,11 +1177,17 @@ class ControlBot:
             self.states.pop(uid, None)
             await m.reply(f"⏱ Интервалы — <b>{acc.get('name')}</b>", reply_markup=self._intervals_menu(acc))
             return
-        elif field == "mining_check_interval_minutes":
-            if not val.isdigit() or int(val) < 1:
-                await m.reply("Нужно число минут (>=1). Ещё раз:")
-                return
-            acc[field] = int(val)
+        elif field == "mining_check_times":
+            if val in ("-", "—", "нет"):
+                acc[field] = []
+            else:
+                parts = [p.strip() for p in re.split(r"[,\s]+", val) if p.strip()]
+                valid = [p for p in parts if re.match(r"^\d{1,2}:\d{2}$", p)]
+                if not valid:
+                    await m.reply("Нужно время ЧЧ:ММ (МСК), можно несколько через запятую — "
+                                  "например «01:00,09:00,17:00». Ещё раз:")
+                    return
+                acc[field] = valid
             self.storage.save()
             self.states.pop(uid, None)
             await m.reply(f"⏱ Интервалы — <b>{acc.get('name')}</b>", reply_markup=self._intervals_menu(acc))
@@ -1210,6 +1244,16 @@ class ControlBot:
             return
         elif field == "farm_fill_model":
             acc[field] = "" if val in ("-", "—", "нет") else val
+            self.storage.save()
+            self.states.pop(uid, None)
+            await m.reply(f"🔧 Обслуживание фермы — <b>{acc.get('name')}</b>",
+                          reply_markup=self._autom_farm_menu(acc))
+            return
+        elif field == "power_watchdog_interval":
+            if not val.isdigit() or int(val) < 60:
+                await m.reply("Нужно число секунд (>=60). Ещё раз:")
+                return
+            acc[field] = int(val)
             self.storage.save()
             self.states.pop(uid, None)
             await m.reply(f"🔧 Обслуживание фермы — <b>{acc.get('name')}</b>",

@@ -79,13 +79,14 @@ class _WorkerBase:
         now = 0.0
         self.card_next_ts = now
         self.roulette_next_ts = now
-        self.mining_next_ts = now
         self.autopay_next_ts = now
         self.autotrade_next_ts = now
         self.container_next_ts = now
         self.shop_next_ts = now
         self.repair_next_ts = now
         self.pcoin_exchange_next_ts = now
+        self.farm_last_power_off_ts = now  # см. farm_maintenance_now — не выключать ферму чаще
+                                            # min_power_toggle_interval (сбрасывает часовой майнинг-таймер)
         self.status = "остановлен"
         self.last_card = "—"
         self.last_roulette = "—"
@@ -101,6 +102,7 @@ class _WorkerBase:
         self.last_accept = "—"
         self.last_farm_maintenance = "—"
         self.last_pcoin_exchange = "—"
+        self.last_power_watchdog = "—"
 
     # ---------- свойства ----------
     @property

@@ -23,7 +23,7 @@ from storage import (
     UPGRADE_WORD, UPGRADE_CATEGORIES, UPGRADE_MAX_MARKER, UPGRADE_BUY_BUTTON, UPGRADE_RESERVE,
     EXCHANGE_WORD,
 )
-from common import MSK, parse_hhmm, fmt_duration, clock, today_msk
+from common import MSK, parse_hhmm, seconds_until_msk, fmt_duration, clock, today_msk
 
 BUFFER_SEC = 5  # буфер к кулдауну, чтобы не упереться ровно в секунду
 
@@ -118,6 +118,39 @@ def parse_farm_state(text: str | None) -> str | None:
         return None
     m = _FARM_STATE_RE.search(text)
     return m.group(1).lower() if m else None
+
+
+# Случайное «Событие» (напр. «Взрыв электростанции (-20% питания)») может урезать
+# доступную мощность PSU/Cooling — если текущее потребление после этого превышает
+# урезанный лимит, ферма уходит в «Перегрузка» и полностью останавливается (не
+# просто «выключена» вручную). «Питание (PSU ур.6): 957/1000 W» / «Охлаждение
+# (Cooling ур.6): 770/900 TDP» — первое число потребление, второе лимит.
+_PSU_RE = re.compile(r"питание\s*\(psu[^)]*\)\s*:\s*([\d.,\s]+)\s*/\s*([\d.,\s]+)\s*w", re.IGNORECASE)
+_COOLING_RE = re.compile(r"охлаждение\s*\(cooling[^)]*\)\s*:\s*([\d.,\s]+)\s*/\s*([\d.,\s]+)\s*tdp", re.IGNORECASE)
+
+
+def _parse_load_num(raw: str) -> float:
+    return float(raw.strip().replace(" ", "").replace(",", "."))
+
+
+def parse_power_load(text: str | None) -> tuple[tuple[float, float] | None, tuple[float, float] | None]:
+    """(психу, охлаждение), каждое — (потребление, лимит) либо None, если не нашли."""
+    text = text or ""
+    m = _PSU_RE.search(text)
+    psu = (_parse_load_num(m.group(1)), _parse_load_num(m.group(2))) if m else None
+    m2 = _COOLING_RE.search(text)
+    cooling = (_parse_load_num(m2.group(1)), _parse_load_num(m2.group(2))) if m2 else None
+    return psu, cooling
+
+
+def _is_overloaded(
+    psu: tuple[float, float] | None, cooling: tuple[float, float] | None,
+) -> bool:
+    if psu and psu[0] > psu[1]:
+        return True
+    if cooling and cooling[0] > cooling[1]:
+        return True
+    return False
 
 
 def parse_cooldown(text: str | None) -> int | None:
@@ -346,6 +379,7 @@ class FarmModule:
             self._container_loop(),
             self._farm_maintenance_loop(),
             self._pcoin_exchange_loop(),
+            self._power_watchdog_loop(),
         ]
 
     def _farm_active(self) -> bool:
@@ -433,33 +467,56 @@ class FarmModule:
                 await asyncio.sleep(5)
 
     # ---------- цикл майнинга ----------
+    def _mining_check_time_list(self) -> list[str]:
+        times = self.account.get("mining_check_times") or []
+        if isinstance(times, str):
+            times = [times]
+        return [str(t).strip() for t in times if str(t).strip()]
+
+    def _next_daily_times_ts(self, times: list[str]) -> float | None:
+        """Ближайший будущий момент (unix ts) среди списка «ЧЧ:ММ» (МСК) в сутках —
+        для отображения «через сколько» в карточке аккаунта."""
+        if not times:
+            return None
+        best = None
+        for t in times:
+            try:
+                hour, minute = parse_hhmm(t)
+            except Exception:
+                continue
+            cand = time.time() + seconds_until_msk(hour, minute)
+            if best is None or cand < best:
+                best = cand
+        return best
+
     async def _mining_loop(self) -> None:
-        """Раз в mining_check_interval_minutes минут (настраивается в боте, по
-        умолчанию 240 = как было раньше) проверяет ферму и собирает майнинг.
-        Больше НЕ привязан к конкретному времени по МСК — простой периодический
-        опрос от текущего момента, как farm_maintenance/repair. Ежедневная награда,
-        авто-вывод и авто-трейд — свои независимые циклы ниже (раньше все три были
-        жёстко привязаны к этому же циклу и срабатывали только вместе со сбором
-        майнинга — отвязано по просьбе, чтобы майнинг можно было проверять часто,
-        не заваливая при этом трейдами/выводами на каждый чих)."""
+        """Запускается СТРОГО в заданные пользователем моменты (account.mining_check_times,
+        МСК) — не на интервале. Раньше был простой опрос каждые mining_check_interval_minutes
+        от текущего момента, но случайные «События» на ферме (напр. «Взрыв электростанции» —
+        режет питание PSU, может увести в аварийную перегрузку) сделали частый слепой опрос
+        бессмысленным — он просто натыкается на ту же аварию и ничего не решает. Ежедневная
+        награда, авто-вывод и авто-трейд — свои независимые циклы ниже."""
+        last_fired: dict[str, object] = {}
         while self.running:
             try:
                 if self._trade_mode or not self._farm_active() or not self.account.get("mining_enabled", True):
                     await asyncio.sleep(20)
                     continue
-                now = time.time()
-                if now < self.mining_next_ts:
-                    await asyncio.sleep(min(20, self.mining_next_ts - now))
-                    continue
-                await self.collect_mining()
-                minutes = max(1, int(self.account.get("mining_check_interval_minutes", 240)))
-                self.mining_next_ts = time.time() + minutes * 60
+                now = datetime.now(MSK)
+                for t in self._mining_check_time_list():
+                    try:
+                        hour, minute = parse_hhmm(t)
+                    except Exception:
+                        continue
+                    if now.hour == hour and now.minute == minute and last_fired.get(t) != now.date():
+                        last_fired[t] = now.date()
+                        await self.collect_mining()
+                await asyncio.sleep(20)
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
                 self.last_mining = f"ошибка: {e}"
-                self.mining_next_ts = time.time() + 60
-                await asyncio.sleep(5)
+                await asyncio.sleep(20)
 
     # ---------- ежедневная награда (свой якорь по mining_time, раз в сутки) ----------
     async def _daily_reward_loop(self) -> None:
@@ -1391,6 +1448,124 @@ class FarmModule:
                 self.last_farm_maintenance = f"ошибка: {e}"
                 await asyncio.sleep(20)
 
+    # ---------- watchdog аварийной перегрузки питания/охлаждения (случайные «События») ----------
+    async def _power_watchdog_loop(self) -> None:
+        """Проверяет питание/охлаждение фермы часто (свой интервал, НЕ расписание
+        обслуживания и НЕ кулдаун min_power_toggle_interval — это аварийная реакция
+        на случайное «Событие» вроде «Взрыв электростанции», которое режет лимит
+        PSU/Cooling и может увести ферму в «Перегрузка» — полная остановка, а не
+        обычное выключение). Снимает РАБОЧИЕ телефоны по одному (не сломанные — см.
+        _remove_working_slot), пока нагрузка не впишется в лимит; снятые запоминаются
+        в farm_slot_models и вернутся сами при следующем плановом обслуживании
+        (farm_maintenance_now), когда появится свободная мощность."""
+        while self.running:
+            try:
+                interval = max(60, int(self.account.get("power_watchdog_interval", 300)))
+                if (self._trade_mode or not self._farm_active()
+                        or not self.account.get("power_watchdog_enabled", False)):
+                    await asyncio.sleep(interval)
+                    continue
+                await self.relieve_overload_now()
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                self.last_power_watchdog = f"ошибка: {e}"
+                await asyncio.sleep(60)
+
+    async def relieve_overload_now(self) -> str:
+        """Если ферма сейчас в аварийной перегрузке питания/охлаждения — снимает
+        рабочие телефоны по одному (перепроверяя нагрузку после каждого), пока
+        не перестанет превышать лимит, затем включает ферму обратно. Используется
+        циклом (power_watchdog_enabled) и кнопкой в меню."""
+        if not self.client or not self.running:
+            self.last_power_watchdog = "аккаунт не запущен"
+            return self.last_power_watchdog
+        if self._trade_mode:
+            self.last_power_watchdog = "идёт трейд — попробуй чуть позже"
+            return self.last_power_watchdog
+        cfg = self.farm_maintenance_cfg
+        bot = cfg.get("bot") or CARDS_BOT
+        mining_cmd = cfg.get("mining_command") or MINING_WORD
+        powered_off = False
+        try:
+            root = await self._send_and_wait(bot, mining_cmd, timeout=20)
+            if root is None:
+                self.last_power_watchdog = f"⚠️ нет ответа на «{mining_cmd}» ({clock()})"
+                return self.last_power_watchdog
+            text = _msg_text(root)
+            psu, cooling = parse_power_load(text)
+            if not _is_overloaded(psu, cooling):
+                self.last_power_watchdog = f"✅ питание/охлаждение в норме ({clock()})"
+                return self.last_power_watchdog
+
+            slots = parse_farm_slots(text)
+            slot_models = self.account.setdefault("farm_slot_models", {})
+            working_nums = sorted(n for n, i in slots.items() if i["status"] == "working")
+            if not working_nums:
+                self.last_power_watchdog = f"⚠️ перегрузка, но нет рабочих телефонов, чтобы снять ({clock()})"
+                return self.last_power_watchdog
+
+            off_result = await self._click_step(bot, root, cfg.get("power_off_button", "выключить"), cfg)
+            powered_off = off_result is not None
+            if powered_off:
+                self.farm_last_power_off_ts = time.time()
+
+            removed: list[str] = []
+            max_removals = min(len(working_nums), max(1, int(cfg.get("power_watchdog_max_removals", 6))))
+            for num in working_nums:
+                if len(removed) >= max_removals:
+                    break
+                model = slots[num].get("model")
+                fresh = await self._send_and_wait(bot, mining_cmd, timeout=20)
+                if fresh is None:
+                    break
+                ok = await self._remove_working_slot(bot, fresh, num, cfg)
+                if ok:
+                    self._bump("farm_extracted")
+                    removed.append(f"№{num} «{model or '?'}»")
+                    if model:
+                        slot_models[str(num)] = model
+                # перепроверяем нагрузку после КАЖДОГО снятия — не снимаем больше, чем нужно
+                check = await self._send_and_wait(bot, mining_cmd, timeout=20)
+                if check is not None and not _is_overloaded(*parse_power_load(_msg_text(check))):
+                    break
+
+            if powered_off:
+                fresh = await self._send_and_wait(bot, mining_cmd, timeout=20)
+                resumed = None
+                if fresh is not None:
+                    resumed = await self._click_step(bot, fresh, cfg.get("power_on_button", "включить"), cfg)
+                powered_off = resumed is None
+
+            if self.storage:
+                try:
+                    self.storage.save()
+                except Exception:
+                    pass
+
+            if removed:
+                self.last_power_watchdog = (
+                    f"⚡ перегрузка — снял: {', '.join(removed)}, вернутся сами при "
+                    f"следующем обслуживании ({clock()} {today_msk()})"
+                )
+            else:
+                self.last_power_watchdog = f"⚠️ перегрузка, снять телефон не удалось ({clock()})"
+            return self.last_power_watchdog
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            self.last_power_watchdog = f"ошибка: {e}"
+            return self.last_power_watchdog
+        finally:
+            if powered_off:
+                try:
+                    fresh = await self._send_and_wait(bot, mining_cmd, timeout=20)
+                    if fresh is not None:
+                        await self._click_step(bot, fresh, cfg.get("power_on_button", "включить"), cfg)
+                except Exception:  # noqa: BLE001
+                    pass
+
     async def _has_working_phone(self, model_name: str, cfg: dict) -> bool:
         """Проверяет «Мои телефоны -> Рабочие телефоны -> [редкость] -> модель
         (xN)» БЕЗ выключения фермы — чтобы решить, стоит ли вообще выключать
@@ -1488,11 +1663,21 @@ class FarmModule:
                 if model:
                     candidate_by_slot[n] = model
 
+            # у майнинга часовой таймер накопления, который сбрасывается КАЖДЫЙ раз при
+            # выключении фермы (даже кратком) — если обслуживание выключало бы её чаще
+            # min_power_toggle_interval (по умолчанию час), накопление никогда бы не
+            # успевало дособраться. Пока действует этот «кулдаун» с прошлого выключения —
+            # пропускаем ВЕСЬ проход извлечения/установки (включая сломанные), не выключая
+            # ферму вообще; следующий плановый проход попробует снова
+            min_toggle = max(0, int(cfg.get("min_power_toggle_interval", 3600)))
+            since_last_off = time.time() - self.farm_last_power_off_ts
+            toggle_cooldown = bool(broken_nums or empty_nums_all) and since_last_off < min_toggle
+
             # проверяем НАЛИЧИЕ телефона ДО выключения фермы — иначе она гаснет
             # впустую, если ставить пока нечего (не завершился ремонт и т.п.), а
             # заодно вообще не трогаем ферму, если она и так укомплектована
             pending_empty_nums: list[int] = []
-            if occupied < target and candidate_by_slot:
+            if not toggle_cooldown and occupied < target and candidate_by_slot:
                 availability: dict[str, bool] = {}
                 for n, model in candidate_by_slot.items():
                     if model not in availability:
@@ -1501,9 +1686,14 @@ class FarmModule:
                         pending_empty_nums.append(n)
                 pending_empty_nums.sort()
 
+            if toggle_cooldown:
+                broken_nums = []
+
             if broken_nums or pending_empty_nums:
                 off_result = await self._click_step(bot, root, cfg.get("power_off_button", "выключить"), cfg)
                 powered_off = off_result is not None
+                if powered_off:
+                    self.farm_last_power_off_ts = time.time()
 
             extracted: list[str] = []
             just_extracted_models: list[str] = []
@@ -1568,10 +1758,15 @@ class FarmModule:
             if reinstalled:
                 parts.append("возвращены в ферму: " + ", ".join(reinstalled))
             if not parts:
-                parts.append(
-                    f"сломанных слотов нет, ферма укомплектована ({occupied}/{target}) "
-                    f"либо пополнять пока нечем"
-                )
+                if toggle_cooldown:
+                    wait_left = int(min_toggle - since_last_off)
+                    parts.append(f"есть что сделать, но жду кулдаун выключения фермы "
+                                 f"(~{max(0, wait_left)}с) — не сбрасываю часовое накопление майнинга")
+                else:
+                    parts.append(
+                        f"сломанных слотов нет, ферма укомплектована ({occupied}/{target}) "
+                        f"либо пополнять пока нечем"
+                    )
             self.last_farm_maintenance = f"🔧 {'; '.join(parts)} ({clock()} {today_msk()})"
             return self.last_farm_maintenance
         except asyncio.CancelledError:
@@ -1623,6 +1818,25 @@ class FarmModule:
             return False, model
         after = await self._click_step(bot, card, extract_btn, cfg, timeout=15)
         return after is not None, model
+
+    async def _remove_working_slot(self, bot: str, root, num: int, cfg: dict) -> bool:
+        """Слот N (РАБОЧИЙ, не сломан) -> карточка -> «Убрать телефон» — снимает
+        исправный телефон обратно в инвентарь (не путать с _extract_broken_slot).
+        Используется только аварийным watchdog'ом питания (relieve_overload_now),
+        чтобы снизить нагрузку на PSU/Cooling после случайного «События», а не
+        рутинной автопочинкой."""
+        prefix = cfg.get("slot_button_prefix", "Слот")
+        slot_btn = _exact_button(root, f"{prefix} {num}")
+        if not slot_btn:
+            return False
+        card = await self._click_exact_step(bot, root, slot_btn, cfg, timeout=15)
+        if card is None:
+            return False
+        remove_btn = _find_button(card, cfg.get("remove_phone_button", "убрать телефон"))
+        if not remove_btn:
+            return False
+        after = await self._click_step(bot, card, remove_btn, cfg, timeout=15)
+        return after is not None
 
     async def _find_phone_button_across_pages(
         self, bot: str, msg, model_name: str, cfg: dict, max_pages: int = 6,
@@ -1804,7 +2018,13 @@ class FarmModule:
         return self._remaining(self.roulette_next_ts)
 
     def mining_remaining(self) -> str:
-        return self._remaining(self.mining_next_ts, "скоро")
+        if not self.running:
+            return "—"
+        ts = self._next_daily_times_ts(self._mining_check_time_list())
+        if ts is None:
+            return "—"
+        rem = ts - time.time()
+        return fmt_duration(int(rem)) if rem > 0 else "скоро"
 
     def container_remaining(self) -> str:
         return self._remaining(self.container_next_ts, "скоро")
