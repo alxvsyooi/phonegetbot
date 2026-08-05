@@ -234,6 +234,9 @@ def parse_unit_price(text: str | None) -> int | None:
 
 # "Улучшить за 10,000" (кнопка «Магазина улучшений»)
 _UPGRADE_COST_RE = re.compile(r"улучшить\s+за\s*([\d\s.,]+)", re.IGNORECASE)
+# "Текущий уровень: 1" (детальный экран категории «Магазина улучшений»)
+_UPGRADE_LEVEL_RE = re.compile(r"текущий\s+уровень:?\s*(\d+)", re.IGNORECASE)
+UPGRADE_MAX_LEVEL = 6
 
 
 def _fmt_points(n: int) -> str:
@@ -248,6 +251,13 @@ def parse_upgrade_cost(button_text: str | None) -> int | None:
         return None
     digits = re.sub(r"\D", "", m.group(1))
     return int(digits) if digits else None
+
+
+def parse_upgrade_level(text: str | None) -> int | None:
+    if not text:
+        return None
+    m = _UPGRADE_LEVEL_RE.search(text)
+    return int(m.group(1)) if m else None
 
 
 def parse_total_price(text: str | None) -> int | None:
@@ -987,9 +997,10 @@ class FarmModule:
                 continue
 
             level_ups, spent, stop_reason = 0, 0, None
+            level = parse_upgrade_level(getattr(cur, "text", None) or getattr(cur, "caption", None) or "")
             while True:
                 dtext = getattr(cur, "text", None) or getattr(cur, "caption", None) or ""
-                if UPGRADE_MAX_MARKER in dtext.lower():
+                if UPGRADE_MAX_MARKER in dtext.lower() or (level is not None and level >= UPGRADE_MAX_LEVEL):
                     break
                 buy_btn = _find_button(cur, UPGRADE_BUY_BUTTON)
                 if not buy_btn:
@@ -1007,12 +1018,24 @@ class FarmModule:
                 # игра переспрашивает подтверждение перед покупкой («✅ Подтвердить»),
                 # но иногда сначала шлёт промежуточное сообщение ДО самого диалога
                 # подтверждения (обнаружено вживую на /pay, см. _execute_pay) —
-                # _click_and_wait_for_button не сдаётся после первого же ответа
+                # _click_and_wait_for_button не сдаётся после первого же ответа И
+                # (после фикса) возвращает РЕАЛЬНЫЙ результат покупки, а не сам
+                # диалог подтверждения (раньше из-за этого код думал, что купил,
+                # хотя игра ещё ничего не поменяла — экран так и оставался на
+                # старом уровне/цене, репорт пользователя со скриншотом)
                 clicked3, result_msg = await self._click_and_wait_for_button(
                     cur, buy_btn, CARDS_BOT, "подтвердить", timeout=15)
                 if not clicked3 or result_msg is None:
                     stop_reason = "подтверждение покупки не прошло, стоп"
                     break
+                # сверяем реальный уровень с экрана результата — если он не вырос,
+                # покупка на деле не прошла, несмотря на «успешный» клик
+                new_level = parse_upgrade_level(
+                    getattr(result_msg, "text", None) or getattr(result_msg, "caption", None) or "")
+                if new_level is not None and level is not None and new_level <= level:
+                    stop_reason = f"уровень не изменился после покупки (был {level}), стоп"
+                    break
+                level = new_level if new_level is not None else ((level + 1) if level is not None else None)
                 level_ups += 1
                 spent += cost
                 balance -= cost
@@ -1032,7 +1055,8 @@ class FarmModule:
                     cur = result_msg
 
             if level_ups:
-                summary = f"+{level_ups} ур. (потрачено {_fmt_points(spent)} ТОчек)"
+                level_note = f" [ур. {level}/{UPGRADE_MAX_LEVEL}]" if level is not None else ""
+                summary = f"+{level_ups} ур.{level_note} (потрачено {_fmt_points(spent)} ТОчек)"
                 if stop_reason:
                     summary += f" — {stop_reason}"
                 lines.append(f"• {label}: {summary}")

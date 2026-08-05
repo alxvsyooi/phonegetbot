@@ -392,8 +392,21 @@ class _WorkerBase:
                     None,
                 )
                 if btn:
+                    # раньше здесь просто возвращали msg (диалог ДО клика по target_button),
+                    # из-за чего вызывающий код (farm.py.upgrade_account) принимал диалог
+                    # «Вы уверены?» за результат покупки, не находил в нём кнопок следующего
+                    # шага и решал, что всё сломалось, — а реальный ответ на подтверждение
+                    # никто не забирал (баг: прокачка на деле не покупала уровни)
                     ok = await self._try_click(msg, btn)
-                    return ok, msg
+                    if not ok:
+                        return False, msg
+                    fut2 = self._register_wait(bot)
+                    try:
+                        result = await asyncio.wait_for(fut2, timeout)
+                    except asyncio.TimeoutError:
+                        self._forget_wait(bot, fut2)
+                        return True, None
+                    return True, result
                 if rows:
                     return False, msg  # другой экран с другими кнопками — не промежуточное сообщение
             return False, msg
