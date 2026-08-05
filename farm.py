@@ -989,6 +989,13 @@ class FarmModule:
         for label in UPGRADE_CATEGORIES:
             btn = _find_button(root, label)
             if not btn:
+                # root мог протухнуть (см. комментарий ниже про переоткрытие магазина) —
+                # даём ему один шанс обновиться, прежде чем сдаться по этой категории
+                refreshed = await self._send_and_wait(CARDS_BOT, UPGRADE_WORD, timeout=15)
+                if refreshed is not None:
+                    root = refreshed
+                    btn = _find_button(root, label)
+            if not btn:
                 lines.append(f"• {label}: кнопка не найдена")
                 continue
             clicked, cur = await self._click_and_wait(root, btn, CARDS_BOT, timeout=15)
@@ -1079,6 +1086,12 @@ class FarmModule:
                 new_root = await self._send_and_wait(CARDS_BOT, UPGRADE_WORD, timeout=15)
             if new_root is not None:
                 root = new_root
+            # небольшая пауза перед следующей категорией НЕЗАВИСИМО от того, была ли
+            # покупка — если категория уже максимальная, покупок нет и паузы после
+            # неё тоже не было; несколько категорий подряд без единой паузы ловят
+            # антифлуд игры, и следующие категории перестают отвечать (репорт
+            # пользователя: «проверяет первые 3 и если они прокачены — перестаёт»)
+            await asyncio.sleep(UPGRADE_STEP_DELAY)
 
         all_maxed = all("максимум" in ln.lower() for ln in lines) if lines else True
         if any_upgraded:
