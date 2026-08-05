@@ -71,7 +71,9 @@ class ContainersApiModule:
         open_cmd = cfg.get("open_command") or "/tcontainershop"
         entry_marker = (cfg.get("entry_button") or "войти в магазин контейнеров").lower()
 
-        msg = await self._send_and_wait(bot, open_cmd, timeout=15)
+        # throttle=False: единственное намеренное исключение из общей паузы ACTION_DELAY
+        # (см. automation.py) — тут решает скорость реакции на восполнение запасов
+        msg = await self._send_and_wait(bot, open_cmd, timeout=15, throttle=False)
         if msg is None:
             return None
         mk = getattr(msg, "reply_markup", None)

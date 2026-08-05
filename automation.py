@@ -21,7 +21,7 @@ from typing import Any
 from pyrogram import Client, filters
 from pyrogram.handlers import MessageHandler, EditedMessageHandler
 
-from storage import CARDS_BOT
+from storage import CARDS_BOT, ACTION_DELAY
 from common import MSK, parse_hhmm, seconds_until_msk, fmt_duration, clock
 from farm import FarmModule
 from autosend import AutosendModule
@@ -323,13 +323,15 @@ class _WorkerBase:
             self._bot_locks[key] = lock
         return lock
 
-    async def _send_and_wait(self, username: str, text: str, timeout: int = 25):
+    async def _send_and_wait(self, username: str, text: str, timeout: int = 25, throttle: bool = True):
         # Лок на бота держим ВЕСЬ круг «отправил -> получил ответ»: несколько циклов
         # (карточки/майнинг/контейнеры/такс/ручной перевод) ходят в ОДНОГО бота
         # (phonegetcardsbot) — без лока параллельная отправка могла зарегистрировать
         # своё ожидание раньше нашего и перехватить наш же ответ (внешне выглядело
         # как «Ткарточка не работает» или как будто карточка распарсила ответ магазина).
         async with self._lock_for_bot(username):
+            if throttle:
+                await asyncio.sleep(ACTION_DELAY)
             fut = self._register_wait(username)
             await self.client.send_message(username, text)
             try:
@@ -446,9 +448,14 @@ class _WorkerBase:
         Точное совпадение текста кнопки проверяется ПЕРВЫМ и имеет приоритет над
         подстрокой: короткая метка вроде «Слот 1» иначе может подстрокой случайно
         поймать «Слот 10»/«Слот 11»/«Слот 12» (та же проблема, что уже чинили
-        числовыми кнопками в farm.py/shop.py — см. _numeric_button)."""
+        числовыми кнопками в farm.py/shop.py — см. _numeric_button).
+
+        Общая пауза ACTION_DELAY перед каждым кликом — единственный общий путь
+        всех кликов по кнопкам во всём боте (магазин контейнеров через HTTP API
+        сюда не заходит вообще, см. containers_api.py — там своя скорость)."""
         if message is None or not getattr(message, "reply_markup", None):
             return False
+        await asyncio.sleep(ACTION_DELAY)
         target = None
         for row in message.reply_markup.inline_keyboard:
             for b in row:
