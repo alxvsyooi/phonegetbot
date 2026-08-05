@@ -106,6 +106,7 @@ class _WorkerBase:
         self.last_upgrade = "—"
         self.last_accept = "—"
         self.last_farm_maintenance = "—"
+        self.last_farm_fill = "—"
         self.last_pcoin_exchange = "—"
         self.last_power_watchdog = "—"
         self.last_containers_api = "—"

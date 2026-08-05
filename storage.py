@@ -351,6 +351,9 @@ ACCOUNT_DEFAULTS: dict[str, Any] = {
                                      # занято от этого числа, пополнение новыми не запускаем (и ферму не трогаем)
     "farm_fill_model": "Samsung Galaxy Z TriFold",  # какой моделью пополнять пустые слоты БЕЗ «памяти»
                                                      # (farm_slot_models) — обычно только что добавленные
+    "farm_fill_rarity": "",         # редкость в «Магазине телефонов» для докупки farm_fill_model кнопкой
+                                     # «Заполнить ферму» (fill_farm_now) — пусто = взять текущую
+                                     # phone_shop_rarity как есть, не переопределять её
     "pcoin_exchange_enabled": False,    # 💱 авто-обмен P-Coins на ТОчки через биржу (пока биржа не отвечает в
                                         # игре — см. farm.py.dump_pcoins_now; тумблер готов на будущее)
     "pcoin_exchange_interval": 14400,   # раз во сколько секунд пробовать биржу, если тумблер включён

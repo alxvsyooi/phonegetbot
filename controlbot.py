@@ -296,6 +296,8 @@ class ControlBot:
                   f"setfarmtarget:{aid}")],
             [_btn(f"📱 Модель для пополнения пустых слотов: {acc.get('farm_fill_model') or '—'}",
                   f"setfarmfill:{aid}")],
+            [_btn(f"🏪 Редкость для докупки этой модели: {acc.get('farm_fill_rarity') or 'как в автозакупке'}",
+                  f"setfarmfillrarity:{aid}")],
             [_btn(f"💱 Авто-обмен P-Coins на бирже: {self._s(acc, 'pcoin_exchange_enabled', False)}",
                   f"texchange:{aid}")],
             [_btn(f"⚡ Аварийный сброс перегрузки питания: {self._s(acc, 'power_watchdog_enabled', False)}",
@@ -334,31 +336,71 @@ class ControlBot:
         ])
 
     def _actions_menu(self, acc: dict) -> InlineKeyboardMarkup:
+        """Верхний уровень «▶️ Действия» — только навигация по группам (был одним
+        длинным плоским списком вперемешку — разложено по смыслу так же, как
+        «⚙️ Автоматизация», см. _automation_menu)."""
         aid = acc["id"]
-        rows = [
+        return InlineKeyboardMarkup([
+            [_btn("🎮 Игра", f"actgame:{aid}")],
+            [_btn("🔧 Ферма", f"actfarm:{aid}")],
+            [_btn("🛠 Мастерская", f"actrepair:{aid}")],
+            [_btn("🏪 Магазин", f"actshop:{aid}")],
+            [_btn("💰 Финансы", f"actfin:{aid}")],
+            [_btn("⬅️ Назад", f"farm:{aid}")],
+        ])
+
+    def _act_game_menu(self, acc: dict) -> InlineKeyboardMarkup:
+        aid = acc["id"]
+        return InlineKeyboardMarkup([
             [_btn("⛏ Собрать майнинг сейчас", f"mine:{aid}")],
-            [_btn("🔄 Слить телефоны (по 🎯 получателю трейда)", f"exch:{aid}")],
             [_btn("🧾 Такс (баланс)", f"taxx:{aid}")],
-            [_btn("🛠 Почистить нерабочие сейчас", f"repairnow:{aid}")],
-            [_btn("🔧 Обслужить ферму сейчас", f"farmmaintnow:{aid}")],
-            [_btn("🏪 Купить телефоны сейчас", f"shopnow:{aid}")],
             [_btn(f"📜 Выполнить достижения (мин. баланс {acc.get('achievements_min_balance', 150000)})",
                   f"achieve:{aid}")],
             [_btn(f"✏️ Цена флипа: {acc.get('avito_flip_price', 5000)}", f"setflipprice:{aid}"),
              _btn(f"✏️ Мин. баланс: {acc.get('achievements_min_balance', 150000)}", f"setachievemin:{aid}")],
-            [_btn("💰 Прокачать аккаунт полностью (нужно от 7 млн)", f"upgradeacc:{aid}")],
-            [_btn("💸 Перевести человеку", f"paystart:{aid}")],
-            [_btn("🤝 Трейд с человеком", f"tradestart:{aid}")],
+            [_btn("⬅️ Назад", f"actions:{aid}")],
+        ])
+
+    def _act_farm_menu(self, acc: dict) -> InlineKeyboardMarkup:
+        aid = acc["id"]
+        rows = [
+            [_btn("🔧 Обслужить ферму сейчас", f"farmmaintnow:{aid}")],
+            [_btn("🧩 Заполнить ферму (докупить недостающее)", f"fillfarmnow:{aid}")],
+            [_btn("⚡ Проверить перегрузку сейчас", f"powerwatchnow:{aid}")],
         ]
         if acc.get("pcoin_exchange_enabled", False):
             rows.append([_btn("💱 Проверить биржу сейчас", f"pcoincheck:{aid}")])
-        rows.append([_btn("⚡ Проверить перегрузку сейчас", f"powerwatchnow:{aid}")])
+        rows.append([_btn("⬅️ Назад", f"actions:{aid}")])
+        return InlineKeyboardMarkup(rows)
+
+    def _act_repair_menu(self, acc: dict) -> InlineKeyboardMarkup:
+        aid = acc["id"]
+        return InlineKeyboardMarkup([
+            [_btn("🛠 Почистить нерабочие сейчас", f"repairnow:{aid}")],
+            [_btn("⬅️ Назад", f"actions:{aid}")],
+        ])
+
+    def _act_shop_menu(self, acc: dict) -> InlineKeyboardMarkup:
+        aid = acc["id"]
+        return InlineKeyboardMarkup([
+            [_btn("🏪 Купить телефоны сейчас", f"shopnow:{aid}")],
+            [_btn("⬅️ Назад", f"actions:{aid}")],
+        ])
+
+    def _act_fin_menu(self, acc: dict) -> InlineKeyboardMarkup:
+        aid = acc["id"]
+        rows = [
+            [_btn("💰 Прокачать аккаунт полностью (нужно от 7 млн)", f"upgradeacc:{aid}")],
+            [_btn("💸 Перевести человеку", f"paystart:{aid}")],
+            [_btn("🤝 Трейд с человеком", f"tradestart:{aid}")],
+            [_btn("🔄 Слить телефоны (по 🎯 получателю трейда)", f"exch:{aid}")],
+        ]
         if not acc.get("autopay_enabled", True):
             rows.append([_btn("💸 Вывести всё", f"payoutall:{aid}")])
         if acc.get("is_main"):
             rows.append([_btn(f"💰 Сумма слива твинкам: {acc.get('drain_amount', 0)}", f"setdrain:{aid}")])
             rows.append([_btn("💧 Слить твинкам сейчас", f"draindo:{aid}")])
-        rows.append([_btn("⬅️ Назад", f"farm:{aid}")])
+        rows.append([_btn("⬅️ Назад", f"actions:{aid}")])
         return InlineKeyboardMarkup(rows)
 
     @staticmethod
@@ -540,6 +582,21 @@ class ControlBot:
             elif data.startswith("actions:"):
                 await q.message.edit_text(f"▶️ Действия — <b>{acc.get('name')}</b>",
                                           reply_markup=self._actions_menu(acc))
+            elif data.startswith("actgame:"):
+                await q.message.edit_text(f"🎮 Игра — <b>{acc.get('name')}</b>",
+                                          reply_markup=self._act_game_menu(acc))
+            elif data.startswith("actfarm:"):
+                await q.message.edit_text(f"🔧 Ферма — <b>{acc.get('name')}</b>",
+                                          reply_markup=self._act_farm_menu(acc))
+            elif data.startswith("actrepair:"):
+                await q.message.edit_text(f"🛠 Мастерская — <b>{acc.get('name')}</b>",
+                                          reply_markup=self._act_repair_menu(acc))
+            elif data.startswith("actshop:"):
+                await q.message.edit_text(f"🏪 Магазин — <b>{acc.get('name')}</b>",
+                                          reply_markup=self._act_shop_menu(acc))
+            elif data.startswith("actfin:"):
+                await q.message.edit_text(f"💰 Финансы — <b>{acc.get('name')}</b>",
+                                          reply_markup=self._act_fin_menu(acc))
             elif data.startswith("targets:"):
                 await q.message.edit_text(f"🎯 Получатели — <b>{acc.get('name')}</b>\n"
                                           f"Введи @username или числовой id получателя.",
@@ -708,6 +765,12 @@ class ControlBot:
                 await q.message.edit_text(
                     "📱 Модель для пополнения пустых слотов, у которых ещё нет «памяти» (как называется "
                     "модель в игре, например «Samsung Galaxy Z TriFold»). Пришли «-» чтобы очистить:")
+            elif data.startswith("setfarmfillrarity:"):
+                self._ask(uid, aid, "farm_fill_rarity")
+                await q.message.edit_text(
+                    "🏪 Редкость в «Магазине телефонов», где искать модель для докупки кнопкой «Заполнить "
+                    "ферму» (напр. Ширпотреб, Необычный, Редкий, Мистический, Хроматический, Аркана, "
+                    "Платиновый). Пришли «-», чтобы брать текущую редкость автозакупки как есть:")
             elif data.startswith("texchange:"):
                 await self._toggle(q, acc, "pcoin_exchange_enabled", redisplay="autfrm")
             elif data.startswith("tpowerwatch:"):
@@ -731,6 +794,8 @@ class ControlBot:
                 await self._start_repair_now(q, aid)
             elif data.startswith("farmmaintnow:"):
                 await self._start_farm_maintenance_now(q, aid)
+            elif data.startswith("fillfarmnow:"):
+                await self._start_fill_farm(q, aid)
             elif data.startswith("shopnow:"):
                 await self._start_shop_now(q, aid)
             elif data.startswith("achieve:"):
@@ -956,7 +1021,7 @@ class ControlBot:
         result = await w.payout_all_now()
         acc = self.storage.get(aid)
         await self._safe_edit(q, self._account_text(acc) + f"\n\n💸 {result}",
-                              self._actions_menu(acc))
+                              self._act_fin_menu(acc))
 
     @staticmethod
     def _twink_ident(acc: dict) -> str:
@@ -1019,7 +1084,19 @@ class ControlBot:
     async def _run_farm_maintenance_now(self, q: CallbackQuery, aid: int, w) -> None:
         result = await w.farm_maintenance_now()
         acc = self.storage.get(aid)
-        await self._safe_edit(q, self._account_text(acc) + f"\n\n🔧 {result}", self._actions_menu(acc))
+        await self._safe_edit(q, self._account_text(acc) + f"\n\n🔧 {result}", self._act_farm_menu(acc))
+
+    async def _start_fill_farm(self, q: CallbackQuery, aid: int) -> None:
+        w = self.manager.workers.get(aid)
+        if not w or not w.running:
+            return await q.answer("Аккаунт не запущен", show_alert=True)
+        await q.answer("⏳ Проверяю пустые слоты, докупаю недостающее...")
+        asyncio.create_task(self._run_fill_farm(q, aid, w))
+
+    async def _run_fill_farm(self, q: CallbackQuery, aid: int, w) -> None:
+        result = await w.fill_farm_now()
+        acc = self.storage.get(aid)
+        await self._safe_edit(q, self._account_text(acc) + f"\n\n🧩 {result}", self._act_farm_menu(acc))
 
     async def _start_shop_now(self, q: CallbackQuery, aid: int) -> None:
         w = self.manager.workers.get(aid)
@@ -1043,7 +1120,7 @@ class ControlBot:
     async def _run_achievements(self, q: CallbackQuery, aid: int, w) -> None:
         result = await w.complete_achievements_now()
         acc = self.storage.get(aid)
-        await self._safe_edit(q, self._account_text(acc) + f"\n\n📜 {result}", self._actions_menu(acc))
+        await self._safe_edit(q, self._account_text(acc) + f"\n\n📜 {result}", self._act_game_menu(acc))
 
     async def _start_dump_pcoins(self, q: CallbackQuery, aid: int) -> None:
         w = self.manager.workers.get(aid)
@@ -1055,7 +1132,7 @@ class ControlBot:
     async def _run_dump_pcoins(self, q: CallbackQuery, aid: int, w) -> None:
         result = await w.dump_pcoins_now()
         acc = self.storage.get(aid)
-        await self._safe_edit(q, self._account_text(acc) + f"\n\n💱 {result}", self._actions_menu(acc))
+        await self._safe_edit(q, self._account_text(acc) + f"\n\n💱 {result}", self._act_farm_menu(acc))
 
     async def _start_power_watchdog(self, q: CallbackQuery, aid: int) -> None:
         w = self.manager.workers.get(aid)
@@ -1067,7 +1144,7 @@ class ControlBot:
     async def _run_power_watchdog(self, q: CallbackQuery, aid: int, w) -> None:
         result = await w.relieve_overload_now()
         acc = self.storage.get(aid)
-        await self._safe_edit(q, self._account_text(acc) + f"\n\n⚡ {result}", self._actions_menu(acc))
+        await self._safe_edit(q, self._account_text(acc) + f"\n\n⚡ {result}", self._act_farm_menu(acc))
 
     async def _start_containers_api(self, q: CallbackQuery, aid: int) -> None:
         w = self.manager.workers.get(aid)
@@ -1092,7 +1169,7 @@ class ControlBot:
     async def _run_upgrade_account(self, q: CallbackQuery, aid: int, w) -> None:
         result = await w.upgrade_account()
         acc = self.storage.get(aid)
-        await self._safe_edit(q, self._account_text(acc) + f"\n\n💰 {result}", self._actions_menu(acc))
+        await self._safe_edit(q, self._account_text(acc) + f"\n\n💰 {result}", self._act_fin_menu(acc))
 
     async def _run_broadcast(self, q: CallbackQuery, uid: int, text: str) -> None:
         owners = {a.get("owner_id") for a in self.storage.accounts if a.get("owner_id")}
@@ -1216,7 +1293,7 @@ class ControlBot:
             await m.reply(f"🔧 Обслуживание фермы — <b>{acc.get('name')}</b>",
                           reply_markup=self._autom_farm_menu(acc))
             return
-        elif field == "farm_fill_model":
+        elif field in ("farm_fill_model", "farm_fill_rarity"):
             acc[field] = "" if val in ("-", "—", "нет") else val
             self.storage.save()
             self.states.pop(uid, None)
@@ -1240,7 +1317,7 @@ class ControlBot:
             acc[field] = int(val)
             self.storage.save()
             self.states.pop(uid, None)
-            await m.reply(f"⚙️ Действия — <b>{acc.get('name')}</b>", reply_markup=self._actions_menu(acc))
+            await m.reply(f"🎮 Игра — <b>{acc.get('name')}</b>", reply_markup=self._act_game_menu(acc))
             return
         elif field == "phone_shop_rarity":
             if not val:
@@ -1353,7 +1430,7 @@ class ControlBot:
         self.states.pop(uid, None)
         w = self.manager.workers.get(acc["id"])
         if not w or not w.running:
-            await m.reply("⚠️ Аккаунт не запущен.", reply_markup=self._actions_menu(acc))
+            await m.reply("⚠️ Аккаунт не запущен.", reply_markup=self._act_fin_menu(acc))
             return
         await m.reply(f"⏳ Перевожу {amount} -> {target}...")
         asyncio.create_task(self._run_manual_pay(m, acc["id"], w, target, amount))
@@ -1361,7 +1438,7 @@ class ControlBot:
     async def _run_manual_pay(self, m: Message, aid: int, w, target: str, amount: int) -> None:
         result = await w.manual_pay(target, amount)
         acc = self.storage.get(aid)
-        await m.reply(f"💸 {result}", reply_markup=self._actions_menu(acc))
+        await m.reply(f"💸 {result}", reply_markup=self._act_fin_menu(acc))
 
     async def _handle_manual_trade(self, m: Message, state: dict) -> None:
         uid = m.from_user.id
@@ -1376,7 +1453,7 @@ class ControlBot:
         self.states.pop(uid, None)
         w = self.manager.workers.get(acc["id"])
         if not w or not w.running:
-            await m.reply("⚠️ Аккаунт не запущен.", reply_markup=self._actions_menu(acc))
+            await m.reply("⚠️ Аккаунт не запущен.", reply_markup=self._act_fin_menu(acc))
             return
         await m.reply(f"⏳ Запускаю трейд с {target} (это надолго)...")
         asyncio.create_task(self._run_manual_trade(m, acc["id"], target))
@@ -1384,7 +1461,7 @@ class ControlBot:
     async def _run_manual_trade(self, m: Message, aid: int, target: str) -> None:
         result = await self.manager.run_trade(aid, target_override=target)
         acc = self.storage.get(aid)
-        await m.reply(f"🤝 {result}", reply_markup=self._actions_menu(acc))
+        await m.reply(f"🤝 {result}", reply_markup=self._act_fin_menu(acc))
 
     async def _handle_addtask(self, m: Message, state: dict) -> None:
         uid = m.from_user.id

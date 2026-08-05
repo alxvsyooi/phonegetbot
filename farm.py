@@ -1807,6 +1807,77 @@ class FarmModule:
                 except Exception:  # noqa: BLE001
                     pass
 
+    async def fill_farm_now(self) -> str:
+        """«Заполнить ферму»: если пустых слотов больше, чем есть уже купленных
+        рабочих телефонов нужной модели (account.farm_fill_model), докупает
+        недостающее количество в «Магазине телефонов» (тот же механизм, что и
+        ShopModule.buy_phones_now(), только с фиксированными на время вызова
+        моделью/редкостью/количеством под ферму, а не настройками автозакупки
+        по расписанию), а затем сразу зовёт farm_maintenance_now() — та уже
+        сама поставит купленные телефоны в пустые слоты. Слоты, для которых
+        УЖЕ есть своя «память» (farm_slot_models — свой телефон вернётся туда
+        после ремонта), докупкой не трогаем — они не про fill_model."""
+        if not self.client or not self.running:
+            self.last_farm_fill = "аккаунт не запущен"
+            return self.last_farm_fill
+        if self._trade_mode:
+            self.last_farm_fill = "идёт трейд — попробуй чуть позже"
+            return self.last_farm_fill
+        fill_model = (self.account.get("farm_fill_model") or "").strip()
+        if not fill_model:
+            self.last_farm_fill = "⚠️ сначала настрой «Модель для пополнения пустых слотов»"
+            return self.last_farm_fill
+
+        cfg = self.farm_maintenance_cfg
+        bot = cfg.get("bot") or CARDS_BOT
+        mining_cmd = cfg.get("mining_command") or MINING_WORD
+        root = await self._send_and_wait(bot, mining_cmd, timeout=20)
+        if root is None:
+            self.last_farm_fill = f"⚠️ нет ответа на «{mining_cmd}» ({clock()})"
+            return self.last_farm_fill
+        slots = parse_farm_slots(_msg_text(root))
+        if not slots:
+            self.last_farm_fill = f"⚠️ не разобрал слоты фермы ({clock()})"
+            return self.last_farm_fill
+
+        slot_models = self.account.get("farm_slot_models", {})
+        empty_nums = sorted(n for n, i in slots.items() if i["status"] == "empty")
+        occupied = len(slots) - len(empty_nums)
+        target = max(0, int(self.account.get("farm_target_phones", 11)))
+        fillable_nums = [n for n in empty_nums if not slot_models.get(str(n))]
+        need = max(0, min(len(fillable_nums), target - occupied))
+        if need <= 0:
+            self.last_farm_fill = (
+                f"докупать не нужно — ферма укомплектована ({occupied}/{target}) "
+                f"либо оставшиеся пустые слоты ждут ремонта своих телефонов ({clock()})")
+            return self.last_farm_fill
+
+        bought_note = ""
+        if not await self._has_working_phone(fill_model, cfg):
+            rarity = (self.account.get("farm_fill_rarity") or "").strip()
+            old_model = self.account.get("phone_shop_model")
+            old_qty = self.account.get("phone_shop_quantity")
+            old_rarity = self.account.get("phone_shop_rarity")
+            self.account["phone_shop_model"] = fill_model
+            self.account["phone_shop_quantity"] = need
+            if rarity:
+                self.account["phone_shop_rarity"] = rarity
+            try:
+                shop_result = await self.buy_phones_now()
+            finally:
+                self.account["phone_shop_model"] = old_model
+                self.account["phone_shop_quantity"] = old_qty
+                if rarity:
+                    self.account["phone_shop_rarity"] = old_rarity
+            bought_note = f"докупка «{fill_model}»: {shop_result}; "
+            if not await self._has_working_phone(fill_model, cfg):
+                self.last_farm_fill = f"{bought_note}⚠️ телефона «{fill_model}» так и нет в наличии ({clock()})"
+                return self.last_farm_fill
+
+        maint_result = await self.farm_maintenance_now()
+        self.last_farm_fill = f"{bought_note}{maint_result}"
+        return self.last_farm_fill
+
     async def _click_exact_step(self, bot: str, msg, exact_text: str, cfg: dict, timeout: int = 15):
         """Как _click_step, но клик СТРОГО по уже разрешённому exact_text (без
         повторного подстрочного поиска) — для «Слот N», где подстрока небезопасна."""
