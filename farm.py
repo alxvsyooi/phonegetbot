@@ -1593,19 +1593,28 @@ class FarmModule:
         (xN)» БЕЗ выключения фермы — чтобы решить, стоит ли вообще выключать
         ферму, ДО того как её выключать (иначе она гаснет впустую, если нужного
         телефона ещё нет — например, ремонт снятого экземпляра не завершился)."""
+        return await self._count_working_phone(model_name, cfg) > 0
+
+    async def _count_working_phone(self, model_name: str, cfg: dict) -> int:
+        """Как _has_working_phone, но возвращает РЕАЛЬНОЕ количество «в запасе»
+        (суффикс «(xN)» на кнопке модели в «Мои телефоны -> Рабочие телефоны»),
+        а не просто «есть хотя бы один» — нужно, чтобы «Заполнить ферму» докупала
+        точную нехватку, а не либо ничего, либо сразу всё целевое число (баг:
+        имея ровно нужное количество уже купленным, всё равно пыталась докупить
+        ещё, раз проверка была булевой и не считала, сколько реально нужно)."""
         if not model_name:
-            return False
+            return 0
         bot = cfg.get("bot") or CARDS_BOT
         phones_cmd = self.repair_cfg.get("my_phones_command", "Мои телефоны")
         entry = await self._send_and_wait(bot, phones_cmd, timeout=20)
         if entry is None:
-            return False
+            return 0
         working_btn = _find_button(entry, cfg.get("working_phones_button", "рабочие телефоны"))
         if not working_btn:
-            return False
+            return 0
         cats = await self._click_step(bot, entry, working_btn, cfg, timeout=15)
         if cats is None:
-            return False
+            return 0
         for rarity_label in _RARITY_LABELS:
             cat_btn = _find_button(cats, rarity_label)
             if not cat_btn:
@@ -1615,8 +1624,9 @@ class FarmModule:
                 continue
             phone_btn, _page = await self._find_phone_button_across_pages(bot, cat_msg, model_name, cfg)
             if phone_btn:
-                return True
-        return False
+                m = re.search(r"\(x?(\d+)\)\s*$", phone_btn.strip(), re.IGNORECASE)
+                return int(m.group(1)) if m else 1
+        return 0
 
     async def farm_maintenance_now(self) -> str:
         """Обслуживание фермы: для каждого слота со статусом СЛОМАН — «Слот N» ->
@@ -1808,15 +1818,20 @@ class FarmModule:
                     pass
 
     async def fill_farm_now(self) -> str:
-        """«Заполнить ферму»: если пустых слотов больше, чем есть уже купленных
-        рабочих телефонов нужной модели (account.farm_fill_model), докупает
-        недостающее количество в «Магазине телефонов» (тот же механизм, что и
-        ShopModule.buy_phones_now(), только с фиксированными на время вызова
-        моделью/редкостью/количеством под ферму, а не настройками автозакупки
-        по расписанию), а затем сразу зовёт farm_maintenance_now() — та уже
-        сама поставит купленные телефоны в пустые слоты. Слоты, для которых
-        УЖЕ есть своя «память» (farm_slot_models — свой телефон вернётся туда
-        после ремонта), докупкой не трогаем — они не про fill_model."""
+        """«Заполнить ферму»: сравнивает, сколько экземпляров account.farm_fill_model
+        УЖЕ стоит на ферме, с целевым account.farm_target_phones. Если уже стоит
+        достаточно (>=target) — ничего не докупает, только (при наличии пустых
+        слотов без своей «памяти») зовёт farm_maintenance_now() поставить то, что
+        уже есть в запасе. Если не хватает — считает РЕАЛЬНОЕ количество в запасе
+        («Мои телефоны -> Рабочие телефоны», через _count_working_phone) и
+        докупает в «Магазине телефонов» ТОЛЬКО точную разницу (а не весь нужный
+        объём или не глядя вообще — раньше проверка была булевой «есть хотя бы
+        один», из-за чего, имея ровно нужное число уже купленным, всё равно
+        пыталась докупить ещё, репорт пользователя: «стоит 10, куплено 10, а он
+        пытается докупить»), используя тот же механизм, что и
+        ShopModule.buy_phones_now(), с временно подставленными моделью/
+        количеством/редкостью. Слоты с уже своей «памятью» (farm_slot_models —
+        свой телефон вернётся туда после ремонта) в докупку не считаются."""
         if not self.client or not self.running:
             self.last_farm_fill = "аккаунт не запущен"
             return self.last_farm_fill
@@ -1842,24 +1857,28 @@ class FarmModule:
 
         slot_models = self.account.get("farm_slot_models", {})
         empty_nums = sorted(n for n, i in slots.items() if i["status"] == "empty")
-        occupied = len(slots) - len(empty_nums)
-        target = max(0, int(self.account.get("farm_target_phones", 11)))
         fillable_nums = [n for n in empty_nums if not slot_models.get(str(n))]
-        need = max(0, min(len(fillable_nums), target - occupied))
-        if need <= 0:
+        target = max(0, int(self.account.get("farm_target_phones", 11)))
+        installed = sum(1 for i in slots.values() if i.get("model") == fill_model)
+
+        if installed >= target or not fillable_nums:
             self.last_farm_fill = (
-                f"докупать не нужно — ферма укомплектована ({occupied}/{target}) "
-                f"либо оставшиеся пустые слоты ждут ремонта своих телефонов ({clock()})")
+                f"докупать не нужно — «{fill_model}» на ферме уже {installed}/{target} "
+                f"({clock()})")
             return self.last_farm_fill
 
+        need_to_install = min(target - installed, len(fillable_nums))
+        spare = await self._count_working_phone(fill_model, cfg)
+        shortfall = max(0, need_to_install - spare)
+
         bought_note = ""
-        if not await self._has_working_phone(fill_model, cfg):
+        if shortfall > 0:
             rarity = (self.account.get("farm_fill_rarity") or "").strip()
             old_model = self.account.get("phone_shop_model")
             old_qty = self.account.get("phone_shop_quantity")
             old_rarity = self.account.get("phone_shop_rarity")
             self.account["phone_shop_model"] = fill_model
-            self.account["phone_shop_quantity"] = need
+            self.account["phone_shop_quantity"] = shortfall
             if rarity:
                 self.account["phone_shop_rarity"] = rarity
             try:
@@ -1869,10 +1888,7 @@ class FarmModule:
                 self.account["phone_shop_quantity"] = old_qty
                 if rarity:
                     self.account["phone_shop_rarity"] = old_rarity
-            bought_note = f"докупка «{fill_model}»: {shop_result}; "
-            if not await self._has_working_phone(fill_model, cfg):
-                self.last_farm_fill = f"{bought_note}⚠️ телефона «{fill_model}» так и нет в наличии ({clock()})"
-                return self.last_farm_fill
+            bought_note = f"докупка «{fill_model}» x{shortfall}: {shop_result}; "
 
         maint_result = await self.farm_maintenance_now()
         self.last_farm_fill = f"{bought_note}{maint_result}"
