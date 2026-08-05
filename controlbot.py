@@ -267,9 +267,6 @@ class ControlBot:
             [_btn(f"📦⚡ Приоритет типов: {acc.get('containers_api_priority') or 'donate,expensive,budget'}",
                   f"setcontapipri:{aid}")],
             [_btn("📦⚡ Проверить/купить сейчас", f"contapinow:{aid}")],
-            [_btn(f"📦 Старый магазин через чат (мёртв — игра перешла на Mini App): "
-                  f"{self._s(acc, 'containers_enabled', False)}", f"tcont:{aid}")],
-            [_btn("📦 Какие категории покупать (для старого) →", f"contcat:{aid}")],
             [_btn("⬅️ Назад", f"autom:{aid}")],
         ])
 
@@ -291,12 +288,10 @@ class ControlBot:
 
     def _autom_farm_menu(self, acc: dict) -> InlineKeyboardMarkup:
         aid = acc["id"]
-        times = acc.get("farm_maintenance_times") or []
-        times_label = ", ".join(times) if times else "не задано — не запустится"
         return InlineKeyboardMarkup([
             [_btn(f"🔧 Обслуживание фермы (снять/починить/вернуть): "
                   f"{self._s(acc, 'farm_maintenance_enabled', False)}", f"tfarmmaint:{aid}")],
-            [_btn(f"⏰ Время обслуживания (МСК, до 2х): {times_label}", f"setfarmtimes:{aid}")],
+            [_btn(f"🔧 Проверять раз в: {acc.get('farm_maintenance_interval', 3600)}с", f"setfarmtimes:{aid}")],
             [_btn(f"🎯 Целевое число телефонов на ферме: {acc.get('farm_target_phones', 11)}",
                   f"setfarmtarget:{aid}")],
             [_btn(f"📱 Модель для пополнения пустых слотов: {acc.get('farm_fill_model') or '—'}",
@@ -326,29 +321,12 @@ class ControlBot:
             [_btn("⬅️ Назад", f"autphn:{aid}")],
         ])
 
-    def _container_categories_menu(self, acc: dict) -> InlineKeyboardMarkup:
-        aid = acc["id"]
-        def s(f):
-            return "вкл ✅" if acc.get(f, True) else "выкл ❌"
-        def q(f):
-            return acc.get(f, 0) or "макс"
-        return InlineKeyboardMarkup([
-            [_btn(f"💰 Бюджетный: {s('containers_buy_budget')}", f"tcontb:{aid}")],
-            [_btn(f"Кол-во за ресток: {q('containers_qty_budget')}", f"setcqb:{aid}")],
-            [_btn(f"💎 Дорогой: {s('containers_buy_expensive')}", f"tconte:{aid}")],
-            [_btn(f"Кол-во за ресток: {q('containers_qty_expensive')}", f"setcqe:{aid}")],
-            [_btn(f"🎁 Донатный: {s('containers_buy_donation')}", f"tcontd:{aid}")],
-            [_btn(f"Кол-во за ресток: {q('containers_qty_donation')}", f"setcqd:{aid}")],
-            [_btn("⬅️ Назад", f"autcnt:{aid}")],
-        ])
-
     def _intervals_menu(self, acc: dict) -> InlineKeyboardMarkup:
         aid = acc["id"]
         return InlineKeyboardMarkup([
             [_btn(f"⏱ Карточки: {acc.get('card_interval', 3600)}с", f"setcard:{aid}")],
             [_btn(f"⏱ Рулетка: {acc.get('roulette_interval', 3600)}с", f"setroul:{aid}")],
-            [_btn(f"⛏ Майнинг — проверять в (МСК): "
-                  f"{', '.join(acc.get('mining_check_times') or []) or 'не задано'}", f"setmininterval:{aid}")],
+            [_btn(f"⛏ Майнинг — раз в: {acc.get('mining_check_interval', 14400)}с", f"setmininterval:{aid}")],
             [_btn(f"🎁 Ежедневная награда (МСК): {acc.get('mining_time', '01:00')}", f"setmtime:{aid}")],
             [_btn(f"💸 Авто-вывод — раз в: {acc.get('autopay_interval', 14400)}с", f"setpayinterval:{aid}")],
             [_btn(f"🤝 Авто-трейд — раз в: {acc.get('autotrade_interval', 14400)}с", f"settradeinterval:{aid}")],
@@ -368,7 +346,7 @@ class ControlBot:
                   f"achieve:{aid}")],
             [_btn(f"✏️ Цена флипа: {acc.get('avito_flip_price', 5000)}", f"setflipprice:{aid}"),
              _btn(f"✏️ Мин. баланс: {acc.get('achievements_min_balance', 150000)}", f"setachievemin:{aid}")],
-            [_btn("💰 Прокачать аккаунт", f"upgradeacc:{aid}")],
+            [_btn("💰 Прокачать аккаунт полностью (нужно от 7 млн)", f"upgradeacc:{aid}")],
             [_btn("💸 Перевести человеку", f"paystart:{aid}")],
             [_btn("🤝 Трейд с человеком", f"tradestart:{aid}")],
         ]
@@ -451,7 +429,6 @@ class ControlBot:
             feat("🃏", "Карточка", "card_enabled", w.card_remaining),
             feat("🎰", "Рулетка", "roulette_enabled", w.roulette_remaining),
             feat("⛏", "Майнинг", "mining_enabled", w.mining_remaining),
-            feat("📦", "Конты", "containers_enabled", w.container_remaining, default=False),
         ]
         lines = [f"🟢 {name}", ""] + [r for r in rows if r]
         return "\n".join(lines)
@@ -625,8 +602,6 @@ class ControlBot:
                 await self._toggle(q, acc, "autopay_enabled", redisplay="autfin")
             elif data.startswith("ttrade:"):
                 await self._toggle(q, acc, "autotrade_enabled", redisplay="autfin")
-            elif data.startswith("tcont:"):
-                await self._toggle(q, acc, "containers_enabled", redisplay="autcnt")
             elif data.startswith("tcontapi:"):
                 await self._toggle(q, acc, "containers_api_enabled", redisplay="autcnt")
             elif data.startswith("setcontapipri:"):
@@ -637,24 +612,6 @@ class ControlBot:
                     "donate, expensive, budget:")
             elif data.startswith("contapinow:"):
                 await self._start_containers_api(q, aid)
-            elif data.startswith("contcat:"):
-                await q.message.edit_text(f"📦 Категории контейнеров — <b>{acc.get('name')}</b>",
-                                          reply_markup=self._container_categories_menu(acc))
-            elif data.startswith("tcontb:"):
-                await self._toggle_container_cat(q, acc, "containers_buy_budget")
-            elif data.startswith("tconte:"):
-                await self._toggle_container_cat(q, acc, "containers_buy_expensive")
-            elif data.startswith("tcontd:"):
-                await self._toggle_container_cat(q, acc, "containers_buy_donation")
-            elif data.startswith("setcqb:"):
-                self._ask(uid, aid, "containers_qty_budget")
-                await q.message.edit_text("Сколько бюджетных контейнеров покупать за ресток (0 — максимум доступного):")
-            elif data.startswith("setcqe:"):
-                self._ask(uid, aid, "containers_qty_expensive")
-                await q.message.edit_text("Сколько дорогих контейнеров покупать за ресток (0 — максимум доступного):")
-            elif data.startswith("setcqd:"):
-                self._ask(uid, aid, "containers_qty_donation")
-                await q.message.edit_text("Сколько донатных контейнеров покупать за ресток (0 — максимум доступного):")
             elif data.startswith("tselfcmd:"):
                 await self._toggle(q, acc, "self_commands_enabled", redisplay="autosend")
             elif data.startswith("setcard:"):
@@ -664,13 +621,8 @@ class ControlBot:
                 self._ask(uid, aid, "roulette_interval")
                 await q.message.edit_text("Отправь интервал рулетки в секундах (>=10):")
             elif data.startswith("setmininterval:"):
-                self._ask(uid, aid, "mining_check_times")
-                await q.message.edit_text(
-                    "⛏ Время(-а) проверки/сбора майнинга, МСК — формат ЧЧ:ММ, можно несколько через "
-                    "запятую (например «01:00,09:00,17:00»). Не на интервале — из-за случайных «Событий» "
-                    "на ферме (может увести в аварийную перегрузку) предсказуемые моменты проверки лучше "
-                    "частого слепого опроса. Пришли «-» чтобы очистить (тогда проверка не будет запускаться):"
-                )
+                self._ask(uid, aid, "mining_check_interval")
+                await q.message.edit_text("Отправь раз во сколько секунд проверять/собирать майнинг (>=60):")
             elif data.startswith("setmtime:"):
                 self._ask(uid, aid, "mining_time")
                 await q.message.edit_text(
@@ -744,11 +696,8 @@ class ControlBot:
             elif data.startswith("tfarmmaint:"):
                 await self._toggle(q, acc, "farm_maintenance_enabled", redisplay="autfrm")
             elif data.startswith("setfarmtimes:"):
-                self._ask(uid, aid, "farm_maintenance_times")
-                await q.message.edit_text(
-                    "⏰ Время(-а) обслуживания фермы, МСК — формат ЧЧ:ММ, можно одно или два через "
-                    "запятую (например «11:00,18:00»). Пришли «-» чтобы очистить — тогда обслуживание "
-                    "не будет запускаться совсем, даже если тумблер включён:")
+                self._ask(uid, aid, "farm_maintenance_interval")
+                await q.message.edit_text("Отправь раз во сколько секунд проверять обслуживание фермы (>=60):")
             elif data.startswith("setfarmtarget:"):
                 self._ask(uid, aid, "farm_target_phones")
                 await q.message.edit_text(
@@ -885,7 +834,7 @@ class ControlBot:
 
     async def _toggle(self, q: CallbackQuery, acc: dict, field: str, redisplay: str = "automation") -> None:
         default = False if field in (
-            "autotrade_enabled", "containers_enabled",
+            "autotrade_enabled",
             "auto_repair_enabled", "auto_accept_enabled", "phone_shop_enabled",
             "msg_alert_enabled", "farm_maintenance_enabled",
             "repair_external_workshop_enabled", "pcoin_exchange_enabled",
@@ -929,12 +878,6 @@ class ControlBot:
         else:  # "automation" — верхний уровень (группы)
             await q.message.edit_text(f"⚙️ Автоматизация — <b>{acc.get('name')}</b>",
                                       reply_markup=self._automation_menu(acc))
-
-    async def _toggle_container_cat(self, q: CallbackQuery, acc: dict, field: str) -> None:
-        acc[field] = not acc.get(field, True)
-        self.storage.save()
-        await q.message.edit_text(f"📦 Категории контейнеров — <b>{acc.get('name')}</b>",
-                                  reply_markup=self._container_categories_menu(acc))
 
     async def _collect_mining(self, q: CallbackQuery, aid: int) -> None:
         w = self.manager.workers.get(aid)
@@ -1218,26 +1161,11 @@ class ControlBot:
                 await m.reply("Нужно число секунд (>=10). Ещё раз:")
                 return
             acc[field] = int(val)
-        elif field in ("autopay_interval", "autotrade_interval"):
+        elif field in ("autopay_interval", "autotrade_interval", "mining_check_interval"):
             if not val.isdigit() or int(val) < 60:
                 await m.reply("Нужно число секунд (>=60). Ещё раз:")
                 return
             acc[field] = int(val)
-            self.storage.save()
-            self.states.pop(uid, None)
-            await m.reply(f"⏱ Интервалы — <b>{acc.get('name')}</b>", reply_markup=self._intervals_menu(acc))
-            return
-        elif field == "mining_check_times":
-            if val in ("-", "—", "нет"):
-                acc[field] = []
-            else:
-                parts = [p.strip() for p in re.split(r"[,\s]+", val) if p.strip()]
-                valid = [p for p in parts if re.match(r"^\d{1,2}:\d{2}$", p)]
-                if not valid:
-                    await m.reply("Нужно время ЧЧ:ММ (МСК), можно несколько через запятую — "
-                                  "например «01:00,09:00,17:00». Ещё раз:")
-                    return
-                acc[field] = valid
             self.storage.save()
             self.states.pop(uid, None)
             await m.reply(f"⏱ Интервалы — <b>{acc.get('name')}</b>", reply_markup=self._intervals_menu(acc))
@@ -1247,16 +1175,6 @@ class ControlBot:
                 await m.reply("Нужно число очков (0 — отключить). Ещё раз:")
                 return
             acc[field] = int(val)
-        elif field in ("containers_qty_budget", "containers_qty_expensive", "containers_qty_donation"):
-            if not val.isdigit():
-                await m.reply("Нужно число (0 — максимум доступного). Ещё раз:")
-                return
-            acc[field] = int(val)
-            self.storage.save()
-            self.states.pop(uid, None)
-            await m.reply(f"📦 Категории контейнеров — <b>{acc.get('name')}</b>",
-                          reply_markup=self._container_categories_menu(acc))
-            return
         elif field in ("repair_external_workshop_name", "repair_external_workshop_owner"):
             if field == "repair_external_workshop_owner" and val not in ("-", "—", "нет"):
                 val = ", ".join(p.strip().lstrip("@") for p in val.split(",") if p.strip())
@@ -1278,17 +1196,11 @@ class ControlBot:
             await m.reply(f"📦 Магазин контейнеров — <b>{acc.get('name')}</b>",
                           reply_markup=self._autom_containers_menu(acc))
             return
-        elif field == "farm_maintenance_times":
-            if val in ("-", "—", "нет"):
-                acc[field] = []
-            else:
-                parts = [p.strip() for p in re.split(r"[,\s]+", val) if p.strip()]
-                valid = [p for p in parts[:2] if re.match(r"^\d{1,2}:\d{2}$", p)]
-                if not valid:
-                    await m.reply("Нужно время ЧЧ:ММ (МСК), одно или два через запятую — "
-                                  "например «11:00,18:00». Ещё раз:")
-                    return
-                acc[field] = valid
+        elif field == "farm_maintenance_interval":
+            if not val.isdigit() or int(val) < 60:
+                await m.reply("Нужно число секунд (>=60). Ещё раз:")
+                return
+            acc[field] = int(val)
             self.storage.save()
             self.states.pop(uid, None)
             await m.reply(f"🔧 Обслуживание фермы — <b>{acc.get('name')}</b>",

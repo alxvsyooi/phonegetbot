@@ -21,6 +21,7 @@ from storage import (
     BALANCE_WORD, PAY_CONFIRM_BUTTON, CONTAINER_WORD,
     DAILY_REWARD_WORD, DAILY_REWARD_BUTTON,
     UPGRADE_WORD, UPGRADE_CATEGORIES, UPGRADE_MAX_MARKER, UPGRADE_BUY_BUTTON, UPGRADE_RESERVE,
+    UPGRADE_MIN_BALANCE_TO_START, UPGRADE_STEP_DELAY,
     EXCHANGE_WORD,
 )
 from common import MSK, parse_hhmm, seconds_until_msk, fmt_duration, clock, today_msk
@@ -467,56 +468,33 @@ class FarmModule:
                 await asyncio.sleep(5)
 
     # ---------- цикл майнинга ----------
-    def _mining_check_time_list(self) -> list[str]:
-        times = self.account.get("mining_check_times") or []
-        if isinstance(times, str):
-            times = [times]
-        return [str(t).strip() for t in times if str(t).strip()]
-
-    def _next_daily_times_ts(self, times: list[str]) -> float | None:
-        """Ближайший будущий момент (unix ts) среди списка «ЧЧ:ММ» (МСК) в сутках —
-        для отображения «через сколько» в карточке аккаунта."""
-        if not times:
-            return None
-        best = None
-        for t in times:
-            try:
-                hour, minute = parse_hhmm(t)
-            except Exception:
-                continue
-            cand = time.time() + seconds_until_msk(hour, minute)
-            if best is None or cand < best:
-                best = cand
-        return best
-
     async def _mining_loop(self) -> None:
-        """Запускается СТРОГО в заданные пользователем моменты (account.mining_check_times,
-        МСК) — не на интервале. Раньше был простой опрос каждые mining_check_interval_minutes
-        от текущего момента, но случайные «События» на ферме (напр. «Взрыв электростанции» —
-        режет питание PSU, может увести в аварийную перегрузку) сделали частый слепой опрос
-        бессмысленным — он просто натыкается на ту же аварию и ничего не решает. Ежедневная
-        награда, авто-вывод и авто-трейд — свои независимые циклы ниже."""
-        last_fired: dict[str, object] = {}
+        """Раз в mining_check_interval секунд (настраивается в боте, как и все
+        остальные интервалы в этом же меню — карточки/рулетка/авто-вывод/авто-трейд)
+        проверяет ферму и собирает майнинг. collect_mining() сам по себе безопасен
+        для частого опроса — он только ВКЛЮЧАЕТ ферму, если она выключена, и никогда
+        не выключает её сам, так что не рискует сбросить часовой таймер накопления
+        (этим рискует только farm_maintenance_now — у него отдельная защита
+        min_power_toggle_interval). Ежедневная награда, авто-вывод и авто-трейд —
+        свои независимые циклы ниже."""
         while self.running:
             try:
                 if self._trade_mode or not self._farm_active() or not self.account.get("mining_enabled", True):
                     await asyncio.sleep(20)
                     continue
-                now = datetime.now(MSK)
-                for t in self._mining_check_time_list():
-                    try:
-                        hour, minute = parse_hhmm(t)
-                    except Exception:
-                        continue
-                    if now.hour == hour and now.minute == minute and last_fired.get(t) != now.date():
-                        last_fired[t] = now.date()
-                        await self.collect_mining()
-                await asyncio.sleep(20)
+                now = time.time()
+                if now < self.mining_next_ts:
+                    await asyncio.sleep(min(20, self.mining_next_ts - now))
+                    continue
+                await self.collect_mining()
+                interval = max(60, int(self.account.get("mining_check_interval", 14400)))
+                self.mining_next_ts = time.time() + interval
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
                 self.last_mining = f"ошибка: {e}"
-                await asyncio.sleep(20)
+                self.mining_next_ts = time.time() + 60
+                await asyncio.sleep(5)
 
     # ---------- ежедневная награда (свой якорь по mining_time, раз в сутки) ----------
     async def _daily_reward_loop(self) -> None:
@@ -961,15 +939,34 @@ class FarmModule:
         (Перезарядка, Шансы выпадения, Шансы апгрейда, Стойка/Охлаждение/Питание
         фермы, Лимит покупок) и в каждой жмёт «Улучшить за N», пока не упрётся в
         максимальный уровень (все категории 6-уровневые) или пока баланса не хватит
-        с учётом неприкосновенного запаса UPGRADE_RESERVE (по требованию владельца —
-        никогда не тратить баланс ниже этого запаса). Баланс проверяется перед
-        КАЖДОЙ покупкой отдельным запросом («такк»), а не один раз в начале — после
-        каждого улучшения он меняется. Используется кнопкой «💰 Прокачать аккаунт»."""
+        с учётом неприкосновенного запаса UPGRADE_RESERVE. Полностью прокачать всё —
+        ощутимые деньги: ниже фиксированного порога UPGRADE_MIN_BALANCE_TO_START (не
+        настройка, не меняется через бота) даже не начинаем, только предупреждаем.
+
+        Баланс проверяется ОДИН РАЗ в самом начале, ДО входа в магазин, и дальше
+        отслеживается ЛОКАЛЬНО (вычитанием потраченного), а НЕ повторным текстовым
+        запросом посреди навигации по инлайн-кнопкам: если слать текстовую команду
+        между кликами, игровой бот сбрасывает состояние диалога, и кнопка «Улучшить
+        за N» на уже показанном сообщении перестаёт отвечать (та же проблема уже
+        чинилась в shop.py — раньше баланс запрашивался заново перед КАЖДОЙ
+        покупкой, из-за чего прокачка успевала сделать ровно один апгрейд и глохла,
+        репорт пользователя). Между последовательными покупками — небольшая пауза
+        (UPGRADE_STEP_DELAY), чтобы не долбить игру слишком резко подряд."""
         if not self.client or not self.running:
             self.last_upgrade = "аккаунт не запущен"
             return self.last_upgrade
         if self._trade_mode:
             self.last_upgrade = "идёт трейд — попробуй чуть позже"
+            return self.last_upgrade
+
+        balance = await self._check_balance()
+        if balance is None:
+            self.last_upgrade = f"⚠️ не удалось проверить баланс ({clock()})"
+            return self.last_upgrade
+        if balance < UPGRADE_MIN_BALANCE_TO_START:
+            self.last_upgrade = (
+                f"⚠️ для прокачки нужно минимум {_fmt_points(UPGRADE_MIN_BALANCE_TO_START)} "
+                f"ТОчек на балансе (сейчас {_fmt_points(balance)}) ({clock()})")
             return self.last_upgrade
 
         root = await self._send_and_wait(CARDS_BOT, UPGRADE_WORD, timeout=15)
@@ -999,9 +996,8 @@ class FarmModule:
                     stop_reason = "неизвестный формат ответа, стоп"
                     break
                 cost = parse_upgrade_cost(buy_btn)
-                balance = await self._check_balance()
-                if cost is None or balance is None:
-                    stop_reason = "не смог разобрать цену/баланс, стоп"
+                if cost is None:
+                    stop_reason = "не смог разобрать цену, стоп"
                     break
                 if balance - cost < UPGRADE_RESERVE:
                     stop_reason = (
@@ -1019,7 +1015,9 @@ class FarmModule:
                     break
                 level_ups += 1
                 spent += cost
+                balance -= cost
                 any_upgraded = True
+                await asyncio.sleep(UPGRADE_STEP_DELAY)
                 # экран успеха даёт «⬅️ Вернуться в магазин» (не «Назад») — жмём его,
                 # чтобы вернуться в деталку категории с обновлённой ценой след. уровня
                 return_btn = (
@@ -1407,46 +1405,33 @@ class FarmModule:
     def _farm_maintenance_active(self) -> bool:
         return self._farm_active() and self.account.get("farm_maintenance_enabled", False)
 
-    def _farm_maintenance_time_list(self) -> list[str]:
-        """До 2 моментов времени (МСК, «ЧЧ:ММ»), когда запускать обслуживание —
-        см. account.farm_maintenance_times. Список копируется/фильтруется
-        каждый раз заново, а не мутируется на месте (см. предостережение в
-        storage.py про общий объект списка по умолчанию)."""
-        times = self.account.get("farm_maintenance_times") or []
-        if isinstance(times, str):
-            times = [times]
-        return [str(t).strip() for t in times[:2] if str(t).strip()]
-
     async def _farm_maintenance_loop(self) -> None:
-        """Запускает farm_maintenance_now() СТРОГО в заданные пользователем
-        моменты (account.farm_maintenance_times, МСК, до 2 значений в сутки) —
-        не на интервале. Раньше цикл дёргал ферму каждые несколько часов вне
-        зависимости от того, есть ли вообще что делать — а farm_maintenance_now()
-        решала, выключать ли ферму, ДО того как реально проверила, что телефон
-        для установки готов, из-за чего ферму иногда выключали впустую (см.
-        _has_working_phone — теперь проверяет наличие ДО выключения). Сам ремонт
-        извлечённых телефонов делает НЕ этот цикл, а auto_repair_loop (repair.py)."""
-        last_fired: dict[str, object] = {}
+        """Раз в farm_maintenance_interval секунд (настраивается в боте, тем же
+        стилем, что и остальные интервалы) вызывает farm_maintenance_now(). Она
+        сама решает, выключать ли ферму, ТОЛЬКО ПОСЛЕ проверки, что телефон для
+        установки реально готов (_has_working_phone) — иначе ферма гасла бы
+        впустую. А min_power_toggle_interval внутри неё не даёт выключать ферму
+        чаще раза в час независимо от того, как часто срабатывает этот цикл — так
+        что можно смело опрашивать чаще, ничего не теряя. Сам ремонт извлечённых
+        телефонов делает НЕ этот цикл, а auto_repair_loop (repair.py)."""
         while self.running:
             try:
                 if self._trade_mode or not self._farm_maintenance_active():
                     await asyncio.sleep(30)
                     continue
-                now = datetime.now(MSK)
-                for t in self._farm_maintenance_time_list():
-                    try:
-                        hour, minute = parse_hhmm(t)
-                    except Exception:
-                        continue
-                    if now.hour == hour and now.minute == minute and last_fired.get(t) != now.date():
-                        last_fired[t] = now.date()
-                        await self.farm_maintenance_now()
-                await asyncio.sleep(20)
+                now = time.time()
+                if now < self.farm_maintenance_next_ts:
+                    await asyncio.sleep(min(30, self.farm_maintenance_next_ts - now))
+                    continue
+                await self.farm_maintenance_now()
+                interval = max(60, int(self.account.get("farm_maintenance_interval", 3600)))
+                self.farm_maintenance_next_ts = time.time() + interval
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
                 self.last_farm_maintenance = f"ошибка: {e}"
-                await asyncio.sleep(20)
+                self.farm_maintenance_next_ts = time.time() + 60
+                await asyncio.sleep(5)
 
     # ---------- watchdog аварийной перегрузки питания/охлаждения (случайные «События») ----------
     async def _power_watchdog_loop(self) -> None:
@@ -2018,13 +2003,7 @@ class FarmModule:
         return self._remaining(self.roulette_next_ts)
 
     def mining_remaining(self) -> str:
-        if not self.running:
-            return "—"
-        ts = self._next_daily_times_ts(self._mining_check_time_list())
-        if ts is None:
-            return "—"
-        rem = ts - time.time()
-        return fmt_duration(int(rem)) if rem > 0 else "скоро"
+        return self._remaining(self.mining_next_ts, "скоро")
 
     def container_remaining(self) -> str:
         return self._remaining(self.container_next_ts, "скоро")
