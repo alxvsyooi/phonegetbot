@@ -290,6 +290,22 @@ def _find_button(message, substr: str) -> str | None:
     return None
 
 
+def _find_rarity_button(message, rarity_label: str) -> str | None:
+    """Ищет кнопку категории редкости по ОСНОВЕ слова, без падежного/числового
+    окончания. «Магазин телефонов» показывает категории в единственном числе
+    («Платиновый»), а «Мои телефоны» — во множественном («Платиновые»); обычный
+    _find_button (полная подстрока) находит только «Ширпотреб» (не склоняется) —
+    для всех остальных 6 редкостей поиск ВСЕГДА молча проваливался, из-за чего
+    бот не видел уже купленные телефоны этих редкостей в «Мои телефоны» (баг
+    воспроизведён вживую: 13 шт. Samsung Galaxy Z TriFold лежат в «Платиновые»,
+    а _has_working_phone стабильно возвращал 0)."""
+    stem = rarity_label[:-2].lower() if len(rarity_label) > 4 else rarity_label.lower()
+    for t in _all_buttons(message):
+        if stem in t.lower():
+            return t
+    return None
+
+
 def _msg_text(message) -> str:
     if message is None:
         return ""
@@ -1639,7 +1655,7 @@ class FarmModule:
         if cats is None:
             return 0
         for rarity_label in _rarity_scan_order(preferred_rarity):
-            cat_btn = _find_button(cats, rarity_label)
+            cat_btn = _find_rarity_button(cats, rarity_label)
             if not cat_btn:
                 continue
             cat_msg = await self._click_step(bot, cats, cat_btn, cfg, timeout=15)
@@ -2037,7 +2053,7 @@ class FarmModule:
             return False
 
         for rarity_label in _rarity_scan_order(preferred_rarity):
-            cat_btn = _find_button(rarity_msg, rarity_label)
+            cat_btn = _find_rarity_button(rarity_msg, rarity_label)
             if not cat_btn:
                 continue
             cat_msg = await self._click_step(bot, rarity_msg, cat_btn, cfg, timeout=15)
