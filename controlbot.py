@@ -199,7 +199,7 @@ class ControlBot:
                   f"setpaytarget:{aid}")],
             [_btn(f"🤝 Трейд -> {acc.get('trade_target') or 'не задано'}",
                   f"settradetarget:{aid}")],
-            [_btn("👑 Сделать получателем для всех моих аккаунтов", f"copytargets:{aid}")],
+            [_btn("👑 Получатель для всех моих акков", f"copytargets:{aid}")],
             [_btn("⬅️ Назад", f"farm:{aid}")],
         ])
 
@@ -262,7 +262,7 @@ class ControlBot:
     def _autom_containers_menu(self, acc: dict) -> InlineKeyboardMarkup:
         aid = acc["id"]
         return InlineKeyboardMarkup([
-            [_btn(f"📦⚡ Покупка через API (актуальное): {self._s(acc, 'containers_api_enabled', False)}",
+            [_btn(f"📦⚡ Покупка через API: {self._s(acc, 'containers_api_enabled', False)}",
                   f"tcontapi:{aid}")],
             [_btn(f"📦⚡ Приоритет типов: {acc.get('containers_api_priority') or 'donate,expensive,budget'}",
                   f"setcontapipri:{aid}")],
@@ -273,15 +273,15 @@ class ControlBot:
     def _autom_repair_menu(self, acc: dict) -> InlineKeyboardMarkup:
         aid = acc["id"]
         return InlineKeyboardMarkup([
-            [_btn(f"🛠 Автопочинка своих телефонов: {self._s(acc, 'auto_repair_enabled', False)}", f"trepair:{aid}")],
-            [_btn(f"🌍 Чужая мастерская, если своей не хватает: "
+            [_btn(f"🛠 Автопочинка телефонов: {self._s(acc, 'auto_repair_enabled', False)}", f"trepair:{aid}")],
+            [_btn(f"🌍 Чужая мастерская при нехватке: "
                   f"{self._s(acc, 'repair_external_workshop_enabled', False)}", f"textworkshop:{aid}")],
-            [_btn(f"🌍 Владелец чужой мастерской (надёжнее): "
+            [_btn(f"🌍 Владелец чужой мастерской: "
                   f"{acc.get('repair_external_workshop_owner') or '—'}", f"setworkshopowner:{aid}")],
-            [_btn(f"🌍 Имя чужой мастерской: {acc.get('repair_external_workshop_name') or 'любая свободная'}",
+            [_btn(f"🌍 Имя чужой мастерской: {acc.get('repair_external_workshop_name') or 'любая'}",
                   f"setworkshop:{aid}")],
-            [_btn(f"📥 Автопринятие чужих заказов: {self._s(acc, 'auto_accept_enabled', False)}", f"taccept:{aid}")],
-            [_btn(f"⭐ Авто-отзыв после ремонта (Критик): {self._s(acc, 'auto_review_enabled', False)}",
+            [_btn(f"📥 Автопринятие заказов: {self._s(acc, 'auto_accept_enabled', False)}", f"taccept:{aid}")],
+            [_btn(f"⭐ Авто-отзыв (Критик): {self._s(acc, 'auto_review_enabled', False)}",
                   f"treview:{aid}")],
             [_btn("⬅️ Назад", f"autom:{aid}")],
         ])
@@ -289,18 +289,18 @@ class ControlBot:
     def _autom_farm_menu(self, acc: dict) -> InlineKeyboardMarkup:
         aid = acc["id"]
         return InlineKeyboardMarkup([
-            [_btn(f"🔧 Обслуживание фермы (снять/починить/вернуть): "
+            [_btn(f"🔧 Обслуживание фермы: "
                   f"{self._s(acc, 'farm_maintenance_enabled', False)}", f"tfarmmaint:{aid}")],
             [_btn(f"🔧 Проверять раз в: {acc.get('farm_maintenance_interval', 3600)}с", f"setfarmtimes:{aid}")],
-            [_btn(f"🎯 Целевое число телефонов на ферме: {acc.get('farm_target_phones', 11)}",
+            [_btn(f"🎯 Целевое число телефонов: {acc.get('farm_target_phones', 11)}",
                   f"setfarmtarget:{aid}")],
-            [_btn(f"📱 Модель для пополнения пустых слотов: {acc.get('farm_fill_model') or '—'}",
+            [_btn(f"📱 Модель для пополнения: {acc.get('farm_fill_model') or '—'}",
                   f"setfarmfill:{aid}")],
-            [_btn(f"🏪 Редкость для докупки этой модели: {acc.get('farm_fill_rarity') or 'как в автозакупке'}",
+            [_btn(f"🏪 Редкость модели: {acc.get('farm_fill_rarity') or 'как в автозакупке'}",
                   f"setfarmfillrarity:{aid}")],
-            [_btn(f"💱 Авто-обмен P-Coins на бирже: {self._s(acc, 'pcoin_exchange_enabled', False)}",
+            [_btn(f"💱 Авто-обмен P-Coins: {self._s(acc, 'pcoin_exchange_enabled', False)}",
                   f"texchange:{aid}")],
-            [_btn(f"⚡ Аварийный сброс перегрузки питания: {self._s(acc, 'power_watchdog_enabled', False)}",
+            [_btn(f"⚡ Сброс перегрузки питания: {self._s(acc, 'power_watchdog_enabled', False)}",
                   f"tpowerwatch:{aid}")],
             [_btn(f"⚡ Проверять раз в: {acc.get('power_watchdog_interval', 300)}с", f"setpowerwatch:{aid}")],
             [_btn("⬅️ Назад", f"autom:{aid}")],
@@ -310,7 +310,7 @@ class ControlBot:
         aid = acc["id"]
         return InlineKeyboardMarkup([
             [_btn(f"🏪 Автозакупка телефонов: {self._s(acc, 'phone_shop_enabled', False)}", f"tshop:{aid}")],
-            [_btn("🏪 Настройки автозакупки телефонов →", f"phoneshop:{aid}")],
+            [_btn("🏪 Настройки автозакупки →", f"phoneshop:{aid}")],
             [_btn("⬅️ Назад", f"autom:{aid}")],
         ])
 
@@ -354,7 +354,7 @@ class ControlBot:
         return InlineKeyboardMarkup([
             [_btn("⛏ Собрать майнинг сейчас", f"mine:{aid}")],
             [_btn("🧾 Такс (баланс)", f"taxx:{aid}")],
-            [_btn(f"📜 Выполнить достижения (мин. баланс {acc.get('achievements_min_balance', 150000)})",
+            [_btn(f"📜 Достижения (мин. {acc.get('achievements_min_balance', 150000)})",
                   f"achieve:{aid}")],
             [_btn(f"✏️ Цена флипа: {acc.get('avito_flip_price', 5000)}", f"setflipprice:{aid}"),
              _btn(f"✏️ Мин. баланс: {acc.get('achievements_min_balance', 150000)}", f"setachievemin:{aid}")],
@@ -365,7 +365,7 @@ class ControlBot:
         aid = acc["id"]
         rows = [
             [_btn("🔧 Обслужить ферму сейчас", f"farmmaintnow:{aid}")],
-            [_btn("🧩 Заполнить ферму (докупить недостающее)", f"fillfarmnow:{aid}")],
+            [_btn("🧩 Заполнить ферму", f"fillfarmnow:{aid}")],
             [_btn("⚡ Проверить перегрузку сейчас", f"powerwatchnow:{aid}")],
         ]
         if acc.get("pcoin_exchange_enabled", False):
@@ -390,10 +390,10 @@ class ControlBot:
     def _act_fin_menu(self, acc: dict) -> InlineKeyboardMarkup:
         aid = acc["id"]
         rows = [
-            [_btn("💰 Прокачать аккаунт полностью (нужно от 7 млн)", f"upgradeacc:{aid}")],
+            [_btn("💰 Прокачать аккаунт (от 7 млн)", f"upgradeacc:{aid}")],
             [_btn("💸 Перевести человеку", f"paystart:{aid}")],
             [_btn("🤝 Трейд с человеком", f"tradestart:{aid}")],
-            [_btn("🔄 Слить телефоны (по 🎯 получателю трейда)", f"exch:{aid}")],
+            [_btn("🔄 Слить телефоны получателю", f"exch:{aid}")],
         ]
         if not acc.get("autopay_enabled", True):
             rows.append([_btn("💸 Вывести всё", f"payoutall:{aid}")])
