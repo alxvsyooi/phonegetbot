@@ -313,6 +313,22 @@ _RARITY_LABELS = [
 ]
 
 
+def _rarity_scan_order(preferred: str | None) -> list[str]:
+    """Порядок перебора редкостей: если известна конкретная редкость модели
+    (напр. account.farm_fill_rarity для TriFold — «Платиновый»), проверяем её
+    ПЕРВОЙ, а не перебираем все 7 подряд начиная с «Ширпотреб» — при большом
+    количестве прочих телефонов на каждой «неправильной» редкости это долгий
+    постраничный перебор впустую (репорт: «заполнение фермы не работает, пока
+    есть другие телефоны, зачем-то заходит в мои телефоны и Ширпотреб»)."""
+    pref = (preferred or "").strip().lower()
+    if not pref:
+        return _RARITY_LABELS
+    matched = [r for r in _RARITY_LABELS if r.lower() == pref]
+    if not matched:
+        return _RARITY_LABELS
+    return matched + [r for r in _RARITY_LABELS if r.lower() != pref]
+
+
 _CATEGORY_KEYWORDS = {"donation": "донат", "expensive": "дорог", "budget": "бюджет"}
 _CATEGORY_EMOJI = {"donation": "🎁", "expensive": "💎", "budget": "💰"}
 _CATEGORY_QTY_FIELD = {
@@ -1588,20 +1604,27 @@ class FarmModule:
                 except Exception:  # noqa: BLE001
                     pass
 
-    async def _has_working_phone(self, model_name: str, cfg: dict) -> bool:
+    async def _has_working_phone(
+        self, model_name: str, cfg: dict, preferred_rarity: str | None = None,
+    ) -> bool:
         """Проверяет «Мои телефоны -> Рабочие телефоны -> [редкость] -> модель
         (xN)» БЕЗ выключения фермы — чтобы решить, стоит ли вообще выключать
         ферму, ДО того как её выключать (иначе она гаснет впустую, если нужного
         телефона ещё нет — например, ремонт снятого экземпляра не завершился)."""
-        return await self._count_working_phone(model_name, cfg) > 0
+        return await self._count_working_phone(model_name, cfg, preferred_rarity) > 0
 
-    async def _count_working_phone(self, model_name: str, cfg: dict) -> int:
+    async def _count_working_phone(
+        self, model_name: str, cfg: dict, preferred_rarity: str | None = None,
+    ) -> int:
         """Как _has_working_phone, но возвращает РЕАЛЬНОЕ количество «в запасе»
         (суффикс «(xN)» на кнопке модели в «Мои телефоны -> Рабочие телефоны»),
         а не просто «есть хотя бы один» — нужно, чтобы «Заполнить ферму» докупала
         точную нехватку, а не либо ничего, либо сразу всё целевое число (баг:
         имея ровно нужное количество уже купленным, всё равно пыталась докупить
-        ещё, раз проверка была булевой и не считала, сколько реально нужно)."""
+        ещё, раз проверка была булевой и не считала, сколько реально нужно).
+
+        preferred_rarity (напр. account.farm_fill_rarity) — если известна,
+        проверяется ПЕРВОЙ, см. _rarity_scan_order."""
         if not model_name:
             return 0
         bot = cfg.get("bot") or CARDS_BOT
@@ -1615,7 +1638,7 @@ class FarmModule:
         cats = await self._click_step(bot, entry, working_btn, cfg, timeout=15)
         if cats is None:
             return 0
-        for rarity_label in _RARITY_LABELS:
+        for rarity_label in _rarity_scan_order(preferred_rarity):
             cat_btn = _find_button(cats, rarity_label)
             if not cat_btn:
                 continue
@@ -1686,14 +1709,21 @@ class FarmModule:
             occupied = len(slots) - len(empty_nums_all)
             target = max(0, int(self.account.get("farm_target_phones", 11)))
             fill_model = (self.account.get("farm_fill_model") or "").strip()
+            fill_rarity = (self.account.get("farm_fill_rarity") or "").strip()
 
             # для каждого пустого слота модель-кандидат: своя память важнее общего
-            # fill_model (снятый на ремонт телефон должен вернуться на своё же место)
+            # fill_model (снятый на ремонт телефон должен вернуться на своё же место).
+            # редкость известна заранее ТОЛЬКО для общего fill_model (farm_fill_rarity) —
+            # для «своей памяти» слота редкость могла быть любой, полный перебор нужен
             candidate_by_slot: dict[int, str] = {}
+            rarity_by_model: dict[str, str | None] = {}
             for n in empty_nums_all:
-                model = slot_models.get(str(n)) or fill_model
+                remembered = slot_models.get(str(n))
+                model = remembered or fill_model
                 if model:
                     candidate_by_slot[n] = model
+                    if not remembered and fill_rarity:
+                        rarity_by_model[model] = fill_rarity
 
             # у майнинга часовой таймер накопления, который сбрасывается КАЖДЫЙ раз при
             # выключении фермы (даже кратком) — если обслуживание выключало бы её чаще
@@ -1713,7 +1743,8 @@ class FarmModule:
                 availability: dict[str, bool] = {}
                 for n, model in candidate_by_slot.items():
                     if model not in availability:
-                        availability[model] = await self._has_working_phone(model, cfg)
+                        availability[model] = await self._has_working_phone(
+                            model, cfg, rarity_by_model.get(model))
                     if availability[model]:
                         pending_empty_nums.append(n)
                 pending_empty_nums.sort()
@@ -1748,7 +1779,8 @@ class FarmModule:
                 fresh = await self._send_and_wait(bot, mining_cmd, timeout=20)
                 if fresh is None:
                     break
-                ok = await self._reinstall_phone_slot(bot, fresh, num, expected, cfg)
+                ok = await self._reinstall_phone_slot(
+                    bot, fresh, num, expected, cfg, rarity_by_model.get(expected))
                 if ok:
                     self._bump("farm_reinstalled")
                     reinstalled.append(f"№{num} «{expected}»")
@@ -1868,7 +1900,8 @@ class FarmModule:
             return self.last_farm_fill
 
         need_to_install = min(target - installed, len(fillable_nums))
-        spare = await self._count_working_phone(fill_model, cfg)
+        fill_rarity = (self.account.get("farm_fill_rarity") or "").strip()
+        spare = await self._count_working_phone(fill_model, cfg, fill_rarity)
         shortfall = max(0, need_to_install - spare)
 
         bought_note = ""
@@ -1969,11 +2002,16 @@ class FarmModule:
             current = nxt
         return None, current
 
-    async def _reinstall_phone_slot(self, bot: str, root, num: int, model_name: str, cfg: dict) -> bool:
+    async def _reinstall_phone_slot(
+        self, bot: str, root, num: int, model_name: str, cfg: dict, preferred_rarity: str | None = None,
+    ) -> bool:
         """Пустой слот N -> «Добавить телефон» -> перебор редкостей -> найти
         рабочий экземпляр model_name (значит, ремонт уже завершился) -> установить.
         Если модель нигде не найдена (ремонт ещё не закончен) — просто пропускает
-        слот, следующий проход цикла попробует снова."""
+        слот, следующий проход цикла попробует снова.
+
+        preferred_rarity (напр. account.farm_fill_rarity для fill_model) —
+        проверяется первой, см. _rarity_scan_order."""
         prefix = cfg.get("slot_button_prefix", "Слот")
         slot_btn = _exact_button(root, f"{prefix} {num}")
         if not slot_btn:
@@ -1988,7 +2026,7 @@ class FarmModule:
         if rarity_msg is None:
             return False
 
-        for rarity_label in _RARITY_LABELS:
+        for rarity_label in _rarity_scan_order(preferred_rarity):
             cat_btn = _find_button(rarity_msg, rarity_label)
             if not cat_btn:
                 continue
