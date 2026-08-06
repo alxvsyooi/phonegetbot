@@ -1709,7 +1709,13 @@ class FarmModule:
             occupied = len(slots) - len(empty_nums_all)
             target = max(0, int(self.account.get("farm_target_phones", 11)))
             fill_model = (self.account.get("farm_fill_model") or "").strip()
-            fill_rarity = (self.account.get("farm_fill_rarity") or "").strip()
+            # farm_fill_rarity не задана явно — используем phone_shop_rarity (та же
+            # редкость, которой аккаунт реально ПОКУПАЕТ fill_model в магазине и,
+            # значит, скорее всего, верна и для поиска уже купленных экземпляров
+            # в «Мои телефоны», а не общий перебор с «Ширпотреб»)
+            fill_rarity = (
+                self.account.get("farm_fill_rarity") or self.account.get("phone_shop_rarity") or ""
+            ).strip()
 
             # для каждого пустого слота модель-кандидат: своя память важнее общего
             # fill_model (снятый на ремонт телефон должен вернуться на своё же место).
@@ -1900,7 +1906,11 @@ class FarmModule:
             return self.last_farm_fill
 
         need_to_install = min(target - installed, len(fillable_nums))
-        fill_rarity = (self.account.get("farm_fill_rarity") or "").strip()
+        # farm_fill_rarity не задана явно — используем phone_shop_rarity, см. комментарий
+        # в farm_maintenance_now() выше
+        fill_rarity = (
+            self.account.get("farm_fill_rarity") or self.account.get("phone_shop_rarity") or ""
+        ).strip()
         spare = await self._count_working_phone(fill_model, cfg, fill_rarity)
         shortfall = max(0, need_to_install - spare)
 

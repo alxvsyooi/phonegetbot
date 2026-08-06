@@ -120,30 +120,18 @@ class ContainersApiModule:
         except Exception:
             return None
 
-    # ---------- одна попытка: проверить и купить всё доступное по приоритету ----------
-    async def buy_containers_api_now(self) -> str:
-        """Получает свежую initData, проверяет состояние магазина и покупает всё
-        доступное по приоритету (containers_api_priority, по умолчанию
-        donate,expensive,budget) в пределах лимитов/места на складе. Используется
-        циклом (containers_api_enabled) и может вызываться вручную."""
-        if not self.client or not self.running:
-            self.last_containers_api = "аккаунт не запущен"
-            return self.last_containers_api
-        if self._trade_mode:
-            self.last_containers_api = "идёт трейд — попробуй чуть позже"
-            return self.last_containers_api
-        cfg = self.containers_api_cfg
+    # ---------- получить свежую initData + состояние магазина одним заходом ----------
+    async def _fetch_state(self, cfg: dict) -> tuple[str | None, dict | None]:
         init_data = await self._fetch_webapp_init_data(cfg)
         if not init_data:
-            self.last_containers_api = f"⚠️ не получил initData мини-аппа ({clock()})"
-            return self.last_containers_api
-
+            return None, None
         state = await self._containers_api_post(cfg, "state", {"initData": init_data})
         if not state or not state.get("success"):
-            err = (state or {}).get("error") if state else None
-            self.last_containers_api = f"⚠️ магазин не ответил{f' ({err})' if err else ''} ({clock()})"
-            return self.last_containers_api
+            return init_data, None
+        return init_data, state
 
+    # ---------- собственно покупка по уже полученным initData/state ----------
+    async def _execute_buy(self, cfg: dict, init_data: str, state: dict) -> str:
         s = state.get("state") or {}
         if not s.get("active"):
             self.last_containers_api = f"порт пуст, следующая поставка: {s.get('next_supply') or '?'} ({clock()})"
@@ -185,7 +173,29 @@ class ContainersApiModule:
             self.last_containers_api = f"нечего купить (распродано/лимиты) ({clock()})"
         return self.last_containers_api
 
-    # ---------- фоновый цикл: далеко от рестока — редко, у рестока — плотно ----------
+    # ---------- одна попытка: проверить и купить всё доступное по приоритету ----------
+    async def buy_containers_api_now(self) -> str:
+        """Получает свежую initData, проверяет состояние магазина и покупает всё
+        доступное по приоритету (containers_api_priority, по умолчанию
+        donate,expensive,budget) в пределах лимитов/места на складе. Используется
+        циклом (containers_api_enabled) и может вызываться вручную."""
+        if not self.client or not self.running:
+            self.last_containers_api = "аккаунт не запущен"
+            return self.last_containers_api
+        if self._trade_mode:
+            self.last_containers_api = "идёт трейд — попробуй чуть позже"
+            return self.last_containers_api
+        cfg = self.containers_api_cfg
+        init_data, state = await self._fetch_state(cfg)
+        if not init_data:
+            self.last_containers_api = f"⚠️ не получил initData мини-аппа ({clock()})"
+            return self.last_containers_api
+        if not state:
+            self.last_containers_api = f"⚠️ магазин не ответил ({clock()})"
+            return self.last_containers_api
+        return await self._execute_buy(cfg, init_data, state)
+
+    # ---------- фоновый цикл: активен — опрашиваем часто, иначе ждём next_supply ----------
     async def _containers_api_loop(self) -> None:
         while self.running:
             try:
@@ -195,14 +205,27 @@ class ContainersApiModule:
                 cfg = self.containers_api_cfg
                 far_interval = max(30, int(cfg.get("poll_far_interval", 300)))
 
-                init_data = await self._fetch_webapp_init_data(cfg)
-                state = await self._containers_api_post(cfg, "state", {"initData": init_data}) \
-                    if init_data else None
-                if not state or not state.get("success"):
+                init_data, state = await self._fetch_state(cfg)
+                if not init_data or not state:
                     await asyncio.sleep(far_interval)
                     continue
 
-                next_supply_ts = _parse_iso_ts((state.get("state") or {}).get("next_supply"))
+                s = state.get("state") or {}
+                if s.get("active"):
+                    # магазин открыт с остатком ПРЯМО СЕЙЧАС — раньше цикл смотрел
+                    # ТОЛЬКО на расчётное окно перед next_supply и мог полностью
+                    # пропустить уже идущий завоз, если next_supply указывал на
+                    # СЛЕДУЮЩИЙ по счёту ресток (далеко впереди), а не на текущий,
+                    # уже открытый (репорт: «конты были 20 минут назад, а скрипту
+                    # похуй абсолютно» — цикл ни разу не пытался купить, просто спал
+                    # far_interval). Пока магазин активен, опрашиваем/покупаем часто
+                    # (active_poll_interval), а не ждём далёкий far_interval
+                    result = await self._execute_buy(cfg, init_data, state)
+                    active_poll = max(1, float(cfg.get("active_poll_interval", 5)))
+                    await asyncio.sleep(far_interval if result.startswith("📦") else active_poll)
+                    continue
+
+                next_supply_ts = _parse_iso_ts(s.get("next_supply"))
                 server_time = state.get("server_time")
                 if not next_supply_ts or not server_time:
                     await asyncio.sleep(far_interval)
