@@ -305,8 +305,13 @@ class TradeSession(_TradeCore):
         self.farm.enter_trade_mode()
         self.main.enter_trade_mode()
         self.farm.last_exchange = "🔄 трейд начат…"
+        # общий потолок должен покрывать offer_wait_timeout (может быть заметно больше
+        # step_timeout, см. _run) плюс запас на остальные шаги — раньше он считался только
+        # от step_timeout и мог сработать РАНЬШЕ, чем истечёт ожидание оффера на шаге 2
+        offer_timeout = int(self.cfg.get("offer_wait_timeout", 90))
+        overall_timeout = offer_timeout + self.timeout * 12
         try:
-            result = await asyncio.wait_for(self._run(), timeout=self.timeout * 14)
+            result = await asyncio.wait_for(self._run(), timeout=overall_timeout)
         except asyncio.TimeoutError:
             result = f"таймаут на: {self._last_step}"
         except Exception as e:  # noqa: BLE001
@@ -328,10 +333,15 @@ class TradeSession(_TradeCore):
         if ack is not None:
             self._log(f"ответ на /trade: {msg_text(ack)[:160]!r}")
 
-        self._progress("шаг 2: жду предложение у главного")
+        # доставка уведомления игрой иногда запаздывает, особенно если получатель как раз
+        # занят своими фоновыми циклами (карточки/майнинг/контейнеры) — отдельный, более
+        # щедрый таймаут именно на этот шаг, не общий step_timeout (репорт: оффер приходил,
+        # но позже общего таймаута, и оставался непринятым — сессия уже сдалась)
+        offer_timeout = int(c.get("offer_wait_timeout", 90))
+        self._progress(f"шаг 2: жду предложение у главного (до {offer_timeout}с)")
         offer = await self._latest(
             self.main, lambda m: find_button_contains(m, c["accept_button"]) is not None,
-            self.timeout)
+            offer_timeout)
         if not offer:
             return "шаг 2: получатель не получил предложение обмена"
         await self._safe_click(offer, find_button_contains(offer, c["accept_button"]))
@@ -381,8 +391,13 @@ class SoloTradeSession(_TradeCore):
             return "трейд уже выполняется"
         self.farm.enter_trade_mode()
         self.farm.last_exchange = "🔄 трейд начат (получатель вне бота)…"
+        # solo_accept_timeout используется ДВАЖДЫ внутри _run (ждём принятия оффера И
+        # ждём завершения обмена человеком) — общий потолок должен покрывать ОБА раза,
+        # раньше считался только от step_timeout и мог сработать раньше их суммы
+        accept_timeout = int(self.cfg.get("solo_accept_timeout", 300))
+        overall_timeout = accept_timeout * 2 + self.timeout * 6
         try:
-            result = await asyncio.wait_for(self._run(), timeout=self.timeout * 14)
+            result = await asyncio.wait_for(self._run(), timeout=overall_timeout)
         except asyncio.TimeoutError:
             result = f"таймаут на: {self._last_step}"
         except Exception as e:  # noqa: BLE001
