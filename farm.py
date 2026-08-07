@@ -638,21 +638,26 @@ class FarmModule:
                 self.container_next_ts = time.time() + 60
                 await asyncio.sleep(5)
 
-    # ---------- биржа P-Coins -> ТОчки (на будущее, см. dump_pcoins_now) ----------
+    # ---------- биржа P-Coins: продажа за ТОчки (dump_pcoins_now) ИЛИ перевод
+    # получателю (send_pcoins_now) — см. account.pcoin_send_enabled/pcoin_exchange_enabled ----------
     async def _pcoin_exchange_loop(self) -> None:
         while self.running:
             try:
-                if (
-                    self._trade_mode or not self._farm_active()
-                    or not self.account.get("pcoin_exchange_enabled", False)
-                ):
+                send_on = self.account.get("pcoin_send_enabled", False)
+                sell_on = self.account.get("pcoin_exchange_enabled", False)
+                if self._trade_mode or not self._farm_active() or not (send_on or sell_on):
                     await asyncio.sleep(30)
                     continue
                 now = time.time()
                 if now < self.pcoin_exchange_next_ts:
                     await asyncio.sleep(min(30, self.pcoin_exchange_next_ts - now))
                     continue
-                await self.dump_pcoins_now()
+                # если включено и то, и другое — приоритет у перевода: P-Coins ценнее
+                # оставить получателю решать, чем сразу превращать в ТОчки твинка
+                if send_on:
+                    await self.send_pcoins_now()
+                else:
+                    await self.dump_pcoins_now()
                 interval = max(60, int(self.account.get("pcoin_exchange_interval", 14400)))
                 self.pcoin_exchange_next_ts = time.time() + interval
             except asyncio.CancelledError:
@@ -1423,6 +1428,102 @@ class FarmModule:
 
             self._bump("pcoin_sold", qty)
             self.last_pcoin_exchange = f"💱 продано {qty} P-Coin ({clock()} {today_msk()})"
+            return self.last_pcoin_exchange
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            self.last_pcoin_exchange = f"ошибка: {e}"
+            return self.last_pcoin_exchange
+
+    async def send_pcoins_now(self) -> str:
+        """💱 Переводит P-Coins из кошелька получателю (account.payout_target) через
+        ту же биржу («/texchange» -> «Отправить P-Coins»), вместо продажи за ТОчки —
+        альтернатива dump_pcoins_now() для твинков, чей P-Coins должны копиться на
+        основном аккаунте, а не превращаться в ТОчки твинка. Флоу (проверено
+        вживую): открыть биржу -> «Отправить P-Coins» -> ответить получателем
+        (@username/id) ТЕКСТОМ -> ответить количеством ТЕКСТОМ -> «Пропустить»
+        комментарий -> «Подтвердить» перевод. Отдельного сообщения об успехе нет —
+        то же сообщение просто редактируется обратно в «Биржа P-Coin» с уменьшенным
+        балансом (баланс здесь не перепроверяем повторно текстом — см. общий баг-
+        паттерн этого бота: текстовая команда посреди навигации сбрасывает диалог).
+        Переводит весь кошелёк."""
+        if not self.client or not self.running:
+            self.last_pcoin_exchange = "аккаунт не запущен"
+            return self.last_pcoin_exchange
+        if self._trade_mode:
+            self.last_pcoin_exchange = "идёт трейд — попробуй чуть позже"
+            return self.last_pcoin_exchange
+        target = (self.account.get("payout_target") or "").strip()
+        if not target:
+            self.last_pcoin_exchange = "⚠️ не задан получатель (payout_target) — задай в 🎯 Получатели"
+            return self.last_pcoin_exchange
+
+        cfg = self.exchange_cfg
+        bot = cfg.get("bot") or CARDS_BOT
+        open_cmd = cfg.get("open_command") or EXCHANGE_WORD
+        try:
+            root = await self._send_and_wait(bot, open_cmd, timeout=15)
+            if root is None:
+                self.last_pcoin_exchange = f"⚠️ биржа ({open_cmd}) не отвечает ({clock()})"
+                return self.last_pcoin_exchange
+
+            wallet = parse_pcoin_wallet(_msg_text(root))
+            if wallet is None:
+                self.last_pcoin_exchange = f"⚠️ не разобрал кошелёк биржи ({clock()})"
+                await self._notify_owner_exchange_unexpected(_msg_text(root))
+                return self.last_pcoin_exchange
+            qty = int(wallet)
+            if qty <= 0:
+                self.last_pcoin_exchange = f"нечего переводить (P-Coins: {wallet:g}) ({clock()})"
+                return self.last_pcoin_exchange
+
+            send_btn = _find_button(root, cfg.get("send_button", "отправить p-coins"))
+            if not send_btn:
+                self.last_pcoin_exchange = f"⚠️ кнопка «отправить P-Coins» не найдена ({clock()})"
+                return self.last_pcoin_exchange
+            clicked, ask_target = await self._click_and_wait(root, send_btn, bot, timeout=15)
+            if not clicked or ask_target is None:
+                self.last_pcoin_exchange = f"⚠️ нет ответа на «отправить P-Coins» ({clock()})"
+                return self.last_pcoin_exchange
+
+            raw = target.lstrip("@")
+            target_norm = raw if raw.isdigit() else f"@{raw}"
+            not_found_marker = (cfg.get("not_found_marker") or "пользователь не найден").lower()
+            ask_qty = await self._send_and_wait(bot, target_norm, timeout=15)
+            if ask_qty is None:
+                self.last_pcoin_exchange = f"⚠️ нет ответа на получателя «{target_norm}» ({clock()})"
+                return self.last_pcoin_exchange
+            if not_found_marker in _msg_text(ask_qty).lower():
+                self.last_pcoin_exchange = f"⚠️ получатель «{target_norm}» не найден игрой ({clock()})"
+                return self.last_pcoin_exchange
+
+            ask_comment = await self._send_and_wait(bot, str(qty), timeout=15)
+            if ask_comment is None:
+                self.last_pcoin_exchange = f"⚠️ нет ответа на количество «{qty}» ({clock()})"
+                return self.last_pcoin_exchange
+
+            skip_btn = _find_button(ask_comment, cfg.get("skip_comment_button", "пропустить"))
+            confirm_screen = ask_comment
+            if skip_btn:
+                clicked_skip, after_skip = await self._click_and_wait(ask_comment, skip_btn, bot, timeout=15)
+                confirm_screen = after_skip if clicked_skip and after_skip is not None else None
+            if confirm_screen is None:
+                self.last_pcoin_exchange = f"⚠️ нет экрана подтверждения перевода ({clock()})"
+                return self.last_pcoin_exchange
+
+            confirm_btn = _find_button(confirm_screen, cfg.get("transfer_confirm_button", "подтвердить"))
+            if not confirm_btn:
+                self.last_pcoin_exchange = f"⚠️ нет кнопки подтверждения перевода ({clock()})"
+                await self._notify_owner_exchange_unexpected(_msg_text(confirm_screen))
+                return self.last_pcoin_exchange
+            clicked2, _done = await self._click_and_wait(confirm_screen, confirm_btn, bot, timeout=15)
+            if not clicked2:
+                self.last_pcoin_exchange = f"⚠️ перевод не подтвердился ({clock()})"
+                return self.last_pcoin_exchange
+
+            self._bump("pcoin_sent", qty)
+            self.last_pcoin_exchange = (
+                f"💱 переведено {qty} P-Coin получателю «{target_norm}» ({clock()} {today_msk()})")
             return self.last_pcoin_exchange
         except asyncio.CancelledError:
             raise

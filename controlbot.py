@@ -298,8 +298,10 @@ class ControlBot:
                   f"setfarmfill:{aid}")],
             [_btn(f"🏪 Редкость модели: {acc.get('farm_fill_rarity') or 'как в автозакупке'}",
                   f"setfarmfillrarity:{aid}")],
-            [_btn(f"💱 Авто-обмен P-Coins: {self._s(acc, 'pcoin_exchange_enabled', False)}",
+            [_btn(f"💱 Продавать P-Coins за ТОчки: {self._s(acc, 'pcoin_exchange_enabled', False)}",
                   f"texchange:{aid}")],
+            [_btn(f"💱 Переводить P-Coins получателю: {self._s(acc, 'pcoin_send_enabled', False)}",
+                  f"tpcoinsend:{aid}")],
             [_btn(f"⚡ Сброс перегрузки питания: {self._s(acc, 'power_watchdog_enabled', False)}",
                   f"tpowerwatch:{aid}")],
             [_btn(f"⚡ Проверять раз в: {acc.get('power_watchdog_interval', 300)}с", f"setpowerwatch:{aid}")],
@@ -369,7 +371,9 @@ class ControlBot:
             [_btn("⚡ Проверить перегрузку сейчас", f"powerwatchnow:{aid}")],
         ]
         if acc.get("pcoin_exchange_enabled", False):
-            rows.append([_btn("💱 Проверить биржу сейчас", f"pcoincheck:{aid}")])
+            rows.append([_btn("💱 Продать P-Coins сейчас", f"pcoincheck:{aid}")])
+        if acc.get("pcoin_send_enabled", False):
+            rows.append([_btn("💱 Перевести P-Coins сейчас", f"pcoinsendnow:{aid}")])
         rows.append([_btn("⬅️ Назад", f"actions:{aid}")])
         return InlineKeyboardMarkup(rows)
 
@@ -773,6 +777,8 @@ class ControlBot:
                     "Платиновый). Пришли «-», чтобы брать текущую редкость автозакупки как есть:")
             elif data.startswith("texchange:"):
                 await self._toggle(q, acc, "pcoin_exchange_enabled", redisplay="autfrm")
+            elif data.startswith("tpcoinsend:"):
+                await self._toggle(q, acc, "pcoin_send_enabled", redisplay="autfrm")
             elif data.startswith("tpowerwatch:"):
                 await self._toggle(q, acc, "power_watchdog_enabled", redisplay="autfrm")
             elif data.startswith("setpowerwatch:"):
@@ -815,6 +821,8 @@ class ControlBot:
                 await self._start_upgrade_account(q, aid)
             elif data.startswith("pcoincheck:"):
                 await self._start_dump_pcoins(q, aid)
+            elif data.startswith("pcoinsendnow:"):
+                await self._start_send_pcoins(q, aid)
             elif data.startswith("powerwatchnow:"):
                 await self._start_power_watchdog(q, aid)
             elif data.startswith("capgo:"):
@@ -902,7 +910,7 @@ class ControlBot:
             "autotrade_enabled",
             "auto_repair_enabled", "auto_accept_enabled", "phone_shop_enabled",
             "msg_alert_enabled", "farm_maintenance_enabled",
-            "repair_external_workshop_enabled", "pcoin_exchange_enabled",
+            "repair_external_workshop_enabled", "pcoin_exchange_enabled", "pcoin_send_enabled",
             "auto_review_enabled", "power_watchdog_enabled", "containers_api_enabled",
         ) else True
         acc[field] = not acc.get(field, default)
@@ -1131,6 +1139,18 @@ class ControlBot:
 
     async def _run_dump_pcoins(self, q: CallbackQuery, aid: int, w) -> None:
         result = await w.dump_pcoins_now()
+        acc = self.storage.get(aid)
+        await self._safe_edit(q, self._account_text(acc) + f"\n\n💱 {result}", self._act_farm_menu(acc))
+
+    async def _start_send_pcoins(self, q: CallbackQuery, aid: int) -> None:
+        w = self.manager.workers.get(aid)
+        if not w or not w.running:
+            return await q.answer("Аккаунт не запущен", show_alert=True)
+        await q.answer("⏳ Пробую перевод P-Coins...")
+        asyncio.create_task(self._run_send_pcoins(q, aid, w))
+
+    async def _run_send_pcoins(self, q: CallbackQuery, aid: int, w) -> None:
+        result = await w.send_pcoins_now()
         acc = self.storage.get(aid)
         await self._safe_edit(q, self._account_text(acc) + f"\n\n💱 {result}", self._act_farm_menu(acc))
 
