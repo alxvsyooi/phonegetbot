@@ -480,7 +480,7 @@ class ControlBot:
         aid = acc["id"]
         return InlineKeyboardMarkup([
             [_btn(f"🛠 Автопочинка телефонов — {self._s(acc, 'auto_repair_enabled', False)}", f"trepair:{aid}")],
-            [_btn(f"🌍 Чужая мастерская при нехватке: "
+            [_btn(f"🌍 Чужая мастерская при нехватке — "
                   f"{self._s(acc, 'repair_external_workshop_enabled', False)}", f"textworkshop:{aid}")],
             [_btn(f"🌍 Владелец чужой мастерской: "
                   f"{acc.get('repair_external_workshop_owner') or '—'}", f"setworkshopowner:{aid}")],
@@ -495,7 +495,7 @@ class ControlBot:
     def _autom_farm_menu(self, acc: dict) -> InlineKeyboardMarkup:
         aid = acc["id"]
         return InlineKeyboardMarkup([
-            [_btn(f"🔧 Обслуживание фермы: "
+            [_btn(f"🔧 Обслуживание фермы — "
                   f"{self._s(acc, 'farm_maintenance_enabled', False)}", f"tfarmmaint:{aid}")],
             [_btn(f"🔧 Проверять раз в: {acc.get('farm_maintenance_interval', 3600)}с", f"setfarmtimes:{aid}")],
             [_btn(f"🎯 Целевое число телефонов: {acc.get('farm_target_phones', 11)}",
