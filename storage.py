@@ -81,6 +81,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "report_time": "00:00",     # ежедневный отчёт, МСК
     "payout_delay": 120,        # пауза после майнинга перед выводом, сек
     "repo_url": "",              # ссылка на репозиторий (гайд самохостинга) — кнопка в главном меню, если задано
+    "redis_url": "",             # брокер Celery + live-статус/Pub-Sub для нового UI; пусто = функции выключены
     "containers": {
         "bot": "phonegetcardsbot",        # кому слать команду открытия магазина
         "open_command": "/tcontainershop",  # чем открываем магазин контейнеров
@@ -435,6 +436,7 @@ _ENV_MAP: dict[str, tuple[str, str]] = {
     "REPORT_TIME": ("report_time", "str"),
     "PAYOUT_DELAY": ("payout_delay", "int"),
     "REPO_URL": ("repo_url", "str"),
+    "REDIS_URL": ("redis_url", "str"),
 }
 
 

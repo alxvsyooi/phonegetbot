@@ -21,8 +21,11 @@ from pyrogram.errors import (
     SessionPasswordNeeded, PhoneCodeInvalid, PhoneCodeExpired, FloodWait, MessageNotModified,
 )
 
+from common import clock
 from manager import Manager
+from redis_client import RedisClient
 from storage import Storage
+from ui_engine import Design, DashboardRegistry, RenderEngine
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -47,13 +50,19 @@ _WELCOME_TEXT = (
 
 
 class ControlBot:
-    def __init__(self, settings: dict[str, Any], storage: Storage, manager: Manager) -> None:
+    def __init__(
+        self, settings: dict[str, Any], storage: Storage, manager: Manager,
+        redis_client: RedisClient | None = None,
+    ) -> None:
         self.settings = settings
         self.storage = storage
         self.manager = manager
+        self.redis_client = redis_client
         self.multi_user = bool(settings.get("multi_user", False))
         self.admin_ids: set[int] = set(settings.get("admin_ids", []))
         self.states: dict[int, dict[str, Any]] = {}  # FSM: user_id -> состояние
+        self.render_engine = RenderEngine()   # хэш-кэш "не редактировать, если не изменилось"
+        self.dashboards = DashboardRegistry()  # user_id -> открытое Dashboard-сообщение (для redis_bridge)
 
         self.app = Client(
             name="control_bot",
@@ -77,8 +86,8 @@ class ControlBot:
             # сообщение может нести только один тип клавиатуры — шлём два:
             # 1) закрепляем снизу постоянную кнопку «/start» (один раз хватит, дальше видна всегда)
             await m.reply(_WELCOME_TEXT, reply_markup=_START_KEYBOARD)
-            # 2) сама панель — с инлайн-кнопками
-            await m.reply("🤖 <b>Панель управления</b>", reply_markup=self._main_menu(m.from_user.id))
+            # 2) сама панель — теперь это Dashboard (см. _dashboard_text/_dashboard_menu)
+            await self._open_dashboard(m)
 
         @self.app.on_message(filters.private & auth & ~filters.command("start"))
         async def _text(_c, m: Message):
@@ -108,6 +117,127 @@ class ControlBot:
         if self._is_creator(uid):
             rows.append([_btn("📣 Рассылка всем пользователям", "broadcast")])
         return InlineKeyboardMarkup(rows)
+
+    # ============ 🏠 Dashboard (корневой экран, пилотный редизайн) ============
+    # Модули — на уровне аккаунта, а не бота; для пользователя с несколькими
+    # аккаунтами дэшборд детально показывает 👑 главный (тот же приоритет, что
+    # уже используется в _accounts_menu), остальные — через кнопку «📱 Аккаунты».
+    _DASHBOARD_MODULES = (
+        ("🎴", "Карточки", "card_enabled", "card_next_ts", "last_card"),
+        ("⛏️", "Майнинг", "mining_enabled", "mining_next_ts", "last_mining"),
+        ("🎰", "Рулетка", "roulette_enabled", "roulette_next_ts", "last_roulette"),
+        ("🎁", "Daily Bonus", "daily_reward_enabled", "daily_next_ts", "last_daily"),
+    )
+
+    def _dashboard_headline_account(self, uid: int) -> dict | None:
+        accs = self._my_accounts(uid)
+        if not accs:
+            return None
+        return next((a for a in accs if a.get("is_main")), accs[0])
+
+    async def _live_field(self, acc_id: int, field: str, default: Any = None) -> Any:
+        """Читает live-значение (next_ts/last_*) сначала из Redis (переживает рестарт
+        витрины), при пустом/выключенном Redis — из атрибутов уже запущенного
+        in-process воркера (manager.workers), как это и раньше читал контрол-бот."""
+        value = None
+        if self.redis_client:
+            value = await self.redis_client.get_status(acc_id, field)
+        if value is None:
+            w = self.manager.workers.get(acc_id)
+            value = getattr(w, field, None) if w else None
+        return value if value is not None else default
+
+    async def _module_status_line(self, acc: dict, emoji: str, label: str,
+                                   enabled_field: str, next_field: str) -> str:
+        aid = acc["id"]
+        w = self.manager.workers.get(aid)
+        running = bool(w and w.running and acc.get("enabled", True))
+        if not acc.get(enabled_field, True):
+            tail = "⏸️ <code>PAUSED</code>"
+            badge = Design.status_badge(False)
+        elif not running:
+            tail = "аккаунт остановлен"
+            badge = Design.alert_badge()
+        else:
+            next_ts = await self._live_field(aid, next_field)
+            tail = f"⏳ Next: <code>{Design.countdown(next_ts)}</code>"
+            badge = Design.status_badge(True)
+        return f"├ {emoji} {label}: {badge} | {tail}"
+
+    async def _dashboard_text(self, uid: int) -> str:
+        accs = self._my_accounts(uid)
+        running = sum(
+            1 for a in accs
+            if (w := self.manager.workers.get(a["id"])) and w.running and a.get("enabled", True)
+        )
+        lines = [
+            "🖥 <b>PHONEGET AUTOMATOR</b>",
+            "───",
+            f"<b>Статус системы:</b> {'🟢 <code>ONLINE</code>' if running else '🔴 <code>OFFLINE</code>'}",
+            f"<b>Активных аккаунтов:</b> <code>{running} / {len(accs)}</code>",
+            "",
+        ]
+        main = self._dashboard_headline_account(uid)
+        if main is None:
+            lines.append("Аккаунтов пока нет — добавь первый через «📱 Аккаунты» ниже.")
+        else:
+            crown = "👑 " if main.get("is_main") else ""
+            lines.append(f"<b>Модули автосбора</b> ({crown}{html.escape(str(main.get('name', '')))}):")
+            for i, (emoji, label, enabled_field, next_field, _last_field) in enumerate(self._DASHBOARD_MODULES):
+                lines.append(await self._module_status_line(main, emoji, label, enabled_field, next_field))
+            lines[-1] = lines[-1].replace("├", "└", 1)  # последняя строка списка — другой символ ветки
+            if len(accs) > 1:
+                lines.append(f"<i>+ ещё {len(accs) - 1} аккаунт(ов) — см. «📱 Аккаунты»</i>")
+            last_drop = await self._live_field(main["id"], "last_card", "—")
+            lines += ["", f"<b>Последний дроп:</b> <code>{html.escape(str(last_drop))}</code>"]
+        lines += ["───", f"<i>Обновлено: {clock()}</i>"]
+        return "\n".join(lines)
+
+    def _dashboard_menu(self, uid: int) -> InlineKeyboardMarkup:
+        accs = self._my_accounts(uid)
+        main = self._dashboard_headline_account(uid)
+        if main is None:
+            return InlineKeyboardMarkup([[_btn("📱 Аккаунты", "list")]])
+        return InlineKeyboardMarkup([
+            [_btn("⚙️ Автоматизация", f"autom:{main['id']}"), _btn(f"📱 Аккаунты ({len(accs)})", "list")],
+            [_btn("📊 Статистика", f"dashstats:{main['id']}"), _btn("🔄 Обновить", "home")],
+        ])
+
+    async def _open_dashboard(self, m: Message) -> None:
+        """Первый показ дэшборда — новым сообщением (после /start редактировать нечего)."""
+        uid = m.from_user.id
+        text = await self._dashboard_text(uid)
+        markup = self._dashboard_menu(uid)
+        sent = await m.reply(text, reply_markup=markup)
+        self.dashboards.register(uid, sent.chat.id, sent.id)
+        self.render_engine.should_render(sent.chat.id, "dashboard", text, markup)  # засеваем кэш
+
+    async def _redraw_dashboard(self, q: CallbackQuery) -> None:
+        uid = q.from_user.id
+        text = await self._dashboard_text(uid)
+        markup = self._dashboard_menu(uid)
+        self.dashboards.register(uid, q.message.chat.id, q.message.id)
+        if self.render_engine.should_render(q.message.chat.id, "dashboard", text, markup):
+            await self._safe_edit(q, text, markup)
+
+    async def refresh_dashboard(self, user_id: int) -> None:
+        """Дёргается из redis_bridge.py по Pub/Sub-событию (Celery-тик или алерт фарм-
+        воркера) — перерисовывает ТОЛЬКО реально открытый дэшборд, и только если
+        содержимое действительно изменилось (RenderEngine)."""
+        loc = self.dashboards.get(user_id)
+        if not loc:
+            return
+        chat_id, message_id = loc
+        text = await self._dashboard_text(user_id)
+        markup = self._dashboard_menu(user_id)
+        if not self.render_engine.should_render(chat_id, "dashboard", text, markup):
+            return
+        try:
+            await self.app.edit_message_text(chat_id, message_id, text, reply_markup=markup)
+        except MessageNotModified:
+            pass
+        except Exception as e:  # noqa: BLE001
+            print(f"[dashboard] не удалось обновить {user_id}: {e}")
 
     def _accounts_menu(self, uid: int) -> InlineKeyboardMarkup:
         rows = []
@@ -225,29 +355,95 @@ class ControlBot:
     def _s(acc: dict, f: str, d: bool = True) -> str:
         return "вкл ✅" if acc.get(f, d) else "выкл ❌"
 
+    @staticmethod
+    def _category_on(acc: dict, fields: list[tuple[str, bool]]) -> bool:
+        return any(acc.get(f, d) for f, d in fields)
+
+    def _automation_text(self, acc: dict) -> str:
+        return f"⚙️ <b>Автоматизация</b> — {acc.get('name')}\nВыбери раздел:"
+
     def _automation_menu(self, acc: dict) -> InlineKeyboardMarkup:
         """Верхний уровень «⚙️ Автоматизация» — только навигация по группам,
         сами тумблеры живут в подменю ниже (было одним длинным плоским списком
-        из 17 кнопок вперемешку — разложено по смыслу)."""
+        из 17 кнопок вперемешку — разложено по смыслу). В коде реально 6 групп
+        (не 4, как в куда более общем ТЗ-мокапе) — категории не сливаем, чтобы не
+        трогать существующую логику, только добавляем 🟢/🔴-индикатор на каждую."""
         aid = acc["id"]
+        game_on = self._category_on(acc, [
+            ("card_enabled", True), ("roulette_enabled", True),
+            ("mining_enabled", True), ("daily_reward_enabled", True),
+        ])
+        fin_on = self._category_on(acc, [("autopay_enabled", True), ("autotrade_enabled", False)])
+        cnt_on = self._category_on(acc, [("containers_api_enabled", False)])
+        rep_on = self._category_on(acc, [
+            ("auto_repair_enabled", False), ("auto_accept_enabled", False), ("auto_review_enabled", False),
+        ])
+        frm_on = self._category_on(acc, [
+            ("farm_maintenance_enabled", False), ("pcoin_exchange_enabled", False),
+            ("pcoin_send_enabled", False), ("power_watchdog_enabled", False),
+        ])
+        shop_on = self._category_on(acc, [("phone_shop_enabled", False)])
         return InlineKeyboardMarkup([
-            [_btn("🎮 Игровой цикл", f"autgame:{aid}")],
-            [_btn("💰 Финансы", f"autfin:{aid}")],
-            [_btn("📦 Магазин контейнеров", f"autcnt:{aid}")],
-            [_btn("🛠 Мастерская (ремонт)", f"autrep:{aid}")],
-            [_btn("🔧 Ферма", f"autfrm:{aid}")],
-            [_btn("🏪 Магазин телефонов", f"autphn:{aid}")],
+            [_btn(f"🎮 Игровой цикл — {Design.status_badge_plain(game_on)}", f"autgame:{aid}")],
+            [_btn(f"💰 Финансы — {Design.status_badge_plain(fin_on)}", f"autfin:{aid}")],
+            [_btn(f"📦 Магазин контейнеров — {Design.status_badge_plain(cnt_on)}", f"autcnt:{aid}")],
+            [_btn(f"🛠 Мастерская (ремонт) — {Design.status_badge_plain(rep_on)}", f"autrep:{aid}")],
+            [_btn(f"🔧 Ферма — {Design.status_badge_plain(frm_on)}", f"autfrm:{aid}")],
+            [_btn(f"🏪 Магазин телефонов — {Design.status_badge_plain(shop_on)}", f"autphn:{aid}")],
             [_btn("⬅️ Назад", f"farm:{aid}")],
         ])
 
     def _autom_game_menu(self, acc: dict) -> InlineKeyboardMarkup:
         aid = acc["id"]
         return InlineKeyboardMarkup([
-            [_btn(f"🃏 Карточки: {self._s(acc, 'card_enabled')}", f"tcard:{aid}")],
+            # 🃏 Карточки — теперь отдельный экран-модуль (см. _cards_module_menu),
+            # остальные 3 строки этого меню не тронуты (не входят в пилот)
+            [_btn(f"🎴 Карточки — {Design.status_badge_plain(acc.get('card_enabled', True))} →", f"cardmod:{aid}")],
             [_btn(f"🎰 Рулетка: {self._s(acc, 'roulette_enabled')}", f"troul:{aid}")],
             [_btn(f"⛏ Майнинг: {self._s(acc, 'mining_enabled')}", f"tmine:{aid}")],
             [_btn(f"🎁 Ежедневная награда: {self._s(acc, 'daily_reward_enabled')}", f"tdaily:{aid}")],
             [_btn("⬅️ Назад", f"autom:{aid}")],
+        ])
+
+    # ---------- 🎴 Карточки — выделенный экран-модуль (пилотный редизайн) ----------
+    # Объединяет то, что раньше было разбросано между _autom_game_menu (тоггл
+    # card_enabled) и _intervals_menu (card_interval) — те callback-префиксы
+    # (tcard:/setcard:) не меняются, только собраны на одном экране + статус из Redis.
+    # Из ТЗ-мокапа сознательно убраны «Авто-продажа»/«Фильтр продаж» (такой логики
+    # в проекте нет — не пилотный UI, а новая функциональность) и «Запустить сейчас»
+    # (нет ручного триггера вытягивания карты) — см. согласованный план.
+    async def _cards_module_text(self, acc: dict) -> str:
+        aid = acc["id"]
+        enabled = acc.get("card_enabled", True)
+        interval = acc.get("card_interval", 3600)
+        next_ts = await self._live_field(aid, "card_next_ts")
+        last = await self._live_field(aid, "last_card", "—")
+        lines = [
+            "🎴 <b>АВТОМАТИЗАЦИЯ: КАРТОЧКИ</b>",
+            "───",
+            f"Модуль отправляет команду в @phonegetcardsbot и забирает выпавшие "
+            f"телефоны — {html.escape(str(acc.get('name', '')))}.",
+            "",
+            "<b>Параметры:</b>",
+            "├ Режим:    <code>команда в чат @phonegetcardsbot</code>",
+            f"└ Интервал: <code>{interval}с</code>",
+            "",
+        ]
+        if enabled:
+            lines.append(f"<b>Статус:</b> {Design.status_badge(True)} | "
+                         f"{Design.wait_badge()} Next: <code>{Design.countdown(next_ts)}</code>")
+        else:
+            lines.append(f"<b>Статус:</b> {Design.status_badge(False)}")
+        lines.append(f"<b>Последний результат:</b> {html.escape(str(last))}")
+        return "\n".join(lines)
+
+    def _cards_module_menu(self, acc: dict) -> InlineKeyboardMarkup:
+        aid = acc["id"]
+        en = acc.get("card_enabled", True)
+        return InlineKeyboardMarkup([
+            [_btn("🔴 Выключить модуль" if en else "🟢 Включить модуль", f"tcard:{aid}")],
+            [_btn(f"⏱️ Изменить интервал ({acc.get('card_interval', 3600)}с)", f"setcard:{aid}")],
+            [_btn("⬅️ Назад в Автоматизацию", f"autgame:{aid}")],
         ])
 
     def _autom_finance_menu(self, acc: dict) -> InlineKeyboardMarkup:
@@ -486,7 +682,7 @@ class ControlBot:
         try:
             if data == "home":
                 self.states.pop(uid, None)
-                await q.message.edit_text("🤖 <b>Панель управления</b>", reply_markup=self._main_menu(uid))
+                await self._redraw_dashboard(q)
                 return await q.answer()
             if data == "list":
                 await q.message.edit_text("📋 <b>Мои аккаунты</b>", reply_markup=self._accounts_menu(uid))
@@ -530,8 +726,8 @@ class ControlBot:
                 return await q.answer()
             if data == "bcast_cancel":
                 self.states.pop(uid, None)
-                await q.message.edit_text("❌ Рассылка отменена.", reply_markup=self._main_menu(uid))
-                return await q.answer()
+                await self._redraw_dashboard(q)
+                return await q.answer("❌ Рассылка отменена")
             if data == "bcast_go":
                 if not self._is_creator(uid):
                     return await q.answer("Только для создателя бота", show_alert=True)
@@ -552,16 +748,21 @@ class ControlBot:
 
             if data.startswith("acc:"):
                 await self._show(q, acc)
+            elif data.startswith("dashstats:"):
+                w = self.manager.workers.get(aid)
+                stats = w.stats_line() if w else "аккаунт не запущен"
+                return await q.answer(stats, show_alert=True)
             elif data.startswith("farm:"):
                 await q.message.edit_text(self._farm_text(acc), reply_markup=self._farm_menu(acc))
             elif data.startswith("autosend:"):
                 await q.message.edit_text(self._autosend_text(acc), reply_markup=self._autosend_menu(acc))
             elif data.startswith("autom:"):
-                await q.message.edit_text(f"⚙️ Автоматизация — <b>{acc.get('name')}</b>",
-                                          reply_markup=self._automation_menu(acc))
+                await q.message.edit_text(self._automation_text(acc), reply_markup=self._automation_menu(acc))
             elif data.startswith("autgame:"):
                 await q.message.edit_text(f"🎮 Игровой цикл — <b>{acc.get('name')}</b>",
                                           reply_markup=self._autom_game_menu(acc))
+            elif data.startswith("cardmod:"):
+                await q.message.edit_text(await self._cards_module_text(acc), reply_markup=self._cards_module_menu(acc))
             elif data.startswith("autfin:"):
                 await q.message.edit_text(f"💰 Финансы — <b>{acc.get('name')}</b>",
                                           reply_markup=self._autom_finance_menu(acc))
@@ -652,7 +853,7 @@ class ControlBot:
             elif data.startswith("tautosend:"):
                 await self._toggle(q, acc, "autosend_enabled", redisplay="autosend")
             elif data.startswith("tcard:"):
-                await self._toggle(q, acc, "card_enabled", redisplay="autgame")
+                await self._toggle(q, acc, "card_enabled", redisplay="cardmod")
             elif data.startswith("troul:"):
                 await self._toggle(q, acc, "roulette_enabled", redisplay="autgame")
             elif data.startswith("tmine:"):
@@ -933,6 +1134,8 @@ class ControlBot:
         elif redisplay == "autgame":
             await q.message.edit_text(f"🎮 Игровой цикл — <b>{acc.get('name')}</b>",
                                       reply_markup=self._autom_game_menu(acc))
+        elif redisplay == "cardmod":
+            await q.message.edit_text(await self._cards_module_text(acc), reply_markup=self._cards_module_menu(acc))
         elif redisplay == "autfin":
             await q.message.edit_text(f"💰 Финансы — <b>{acc.get('name')}</b>",
                                       reply_markup=self._autom_finance_menu(acc))
@@ -949,8 +1152,7 @@ class ControlBot:
             await q.message.edit_text(f"🏪 Магазин телефонов — <b>{acc.get('name')}</b>",
                                       reply_markup=self._autom_phoneshop_menu(acc))
         else:  # "automation" — верхний уровень (группы)
-            await q.message.edit_text(f"⚙️ Автоматизация — <b>{acc.get('name')}</b>",
-                                      reply_markup=self._automation_menu(acc))
+            await q.message.edit_text(self._automation_text(acc), reply_markup=self._automation_menu(acc))
 
     async def _collect_mining(self, q: CallbackQuery, aid: int) -> None:
         w = self.manager.workers.get(aid)
