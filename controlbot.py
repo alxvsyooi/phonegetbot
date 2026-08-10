@@ -650,29 +650,33 @@ class ControlBot:
         """Свёрнутая карточка: только «через сколько что» по фичам, которые СЕЙЧАС
         включены — выключенная фича просто не показывается (не путать с прошлым
         вариантом, где стояло «выкл»: тут бот реально отслеживает тумблеры, а не
-        показывает устаревший last_* текст). Подробности — кнопки в ▶️ Действия."""
+        показывает устаревший last_* текст). Подробности — кнопки в ▶️ Действия.
+        Визуал переоформлен под общую дизайн-систему (см. ui_engine.Design) — сами
+        источники данных (w.card_remaining() и т.п.) и условия показа не менялись."""
         w = self.manager.workers.get(acc["id"])
         crown = "👑 " if acc.get("is_main") else ""
         name = f"{crown}<b>{acc.get('name')}</b>"
 
         if not acc.get("enabled", True):
-            return f"🔴 {name}\nАккаунт выключен."
+            return f"🔴 {name}\n───\nАккаунт выключен."
         if not w or not w.running:
-            return f"🔴 {name}\nАккаунт не запущен."
+            return f"{Design.alert_badge()} {name}\n───\nАккаунт не запущен."
 
         farm_on = acc.get("farm_enabled", True)
 
         def feat(emoji: str, label: str, field: str, remaining_fn, default: bool = True) -> str | None:
             if not farm_on or not acc.get(field, default):
                 return None
-            return f"{emoji} {label}: через <b>{remaining_fn()}</b>"
+            return f"{emoji} {label}: {Design.wait_badge()} через <code>{remaining_fn()}</code>"
 
         rows = [
-            feat("🃏", "Карточка", "card_enabled", w.card_remaining),
+            feat("🎴", "Карточка", "card_enabled", w.card_remaining),
             feat("🎰", "Рулетка", "roulette_enabled", w.roulette_remaining),
             feat("⛏", "Майнинг", "mining_enabled", w.mining_remaining),
         ]
-        lines = [f"🟢 {name}", ""] + [r for r in rows if r]
+        body = [r for r in rows if r]
+        lines = [f"🟢 {name}", "───"]
+        lines += body if body else ["<i>Все фарм-модули выключены.</i>"]
         return "\n".join(lines)
 
     # ============ callback ============
@@ -1101,7 +1105,9 @@ class ControlBot:
                 pass
 
     async def _show(self, q: CallbackQuery, acc: dict) -> None:
-        await q.message.edit_text(self._account_text(acc), reply_markup=self._account_menu(acc))
+        text, markup = self._account_text(acc), self._account_menu(acc)
+        if self.render_engine.should_render(q.message.chat.id, f"account:{acc['id']}", text, markup):
+            await self._safe_edit(q, text, markup)
 
     def _ask(self, uid: int, aid: int, field: str) -> None:
         self.states[uid] = {"flow": "set", "field": field, "acc_id": aid}
