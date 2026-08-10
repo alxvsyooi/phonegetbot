@@ -82,11 +82,18 @@ class ControlBot:
 
         @self.app.on_message(filters.command("start") & auth)
         async def _start(_c, m: Message):
-            self.states.pop(m.from_user.id, None)
-            # сообщение может нести только один тип клавиатуры — шлём два:
-            # 1) закрепляем снизу постоянную кнопку «/start» (один раз хватит, дальше видна всегда)
-            await m.reply(_WELCOME_TEXT, reply_markup=_START_KEYBOARD)
-            # 2) сама панель — теперь это Dashboard (см. _dashboard_text/_dashboard_menu)
+            uid = m.from_user.id
+            self.states.pop(uid, None)
+            if not self._my_accounts(uid):
+                # первый заход — аккаунтов ещё нет: объясняем, что бот умеет, и
+                # закрепляем снизу постоянную кнопку «/start» (сообщение может нести
+                # только ОДИН тип клавиатуры — reply или inline, не оба сразу, поэтому
+                # первый раз это два сообщения; дальше держится и без повтора)
+                await m.reply(_WELCOME_TEXT, reply_markup=_START_KEYBOARD)
+                await self._open_dashboard(m)
+                return
+            # уже есть хотя бы один аккаунт — сразу Dashboard, без повторного онбординга
+            # на каждый /start (постоянная кнопка снизу уже закреплена с первого раза)
             await self._open_dashboard(m)
 
         @self.app.on_message(filters.private & auth & ~filters.command("start"))
@@ -257,9 +264,12 @@ class ControlBot:
     def _account_menu(self, acc: dict) -> InlineKeyboardMarkup:
         aid = acc["id"]
         en = acc.get("enabled", True)
+        farm_badge = Design.status_badge_plain(acc.get("farm_enabled", True))
+        autosend_badge = Design.status_badge_plain(acc.get("autosend_enabled", True))
         rows = [
             [_btn("⏸ Выключить" if en else "▶️ Включить", f"toggle:{aid}")],
-            [_btn("📱 Фарм карточек", f"farm:{aid}"), _btn("📨 Автоотправка", f"autosend:{aid}")],
+            [_btn(f"📱 Фарм карточек — {farm_badge}", f"farm:{aid}"),
+             _btn(f"📨 Автоотправка — {autosend_badge}", f"autosend:{aid}")],
             [_btn("⚙️ Настройки", f"settings:{aid}")],
             [_btn("🔄 Обновить", f"acc:{aid}"), _btn("⬅️ Назад", "list")],
         ]
