@@ -11,6 +11,8 @@ from datetime import datetime
 from automation import MSK, _parse_hhmm
 from controlbot import ControlBot
 from manager import Manager
+from redis_client import RedisClient
+import redis_bridge
 from storage import Storage, load_settings
 
 
@@ -129,26 +131,35 @@ async def main() -> None:
         avito_cfg=settings.get("avito", {}),
         containers_api_cfg=settings.get("containers_api", {}),
     )
-    control = ControlBot(settings, storage, manager)
+    redis_client = RedisClient(settings.get("redis_url"))
+    control = ControlBot(settings, storage, manager, redis_client)
     manager.bot_app = control.app  # чтобы фарм-воркеры могли слать интерактивные алерты (капча и т.п.)
+    manager.redis_client = redis_client  # write-through live-статуса и Pub/Sub-алерты (см. redis_client.py)
 
     print("[startup] подключаю управляющего бота...")
     await control.app.start()
     print("[startup] управляющий бот ЗАПУЩЕН ✅")
     mode = "мультипользовательский" if control.multi_user else "только админы"
     print(f"[startup] режим доступа: {mode}")
+    if redis_client.enabled:
+        print("[startup] Redis подключен — live-дэшборд и Pub/Sub-уведомления активны")
+    else:
+        print("[startup] Redis не настроен (redis_url пуст) — дэшборд/уведомления работают без live-обновлений")
     print("[startup] запускаю аккаунты...")
     await manager.start_all()
     print(f"[startup] активных аккаунтов: {len(manager.workers)}/{len(storage.accounts)}")
     print("[startup] готово. Открой бота в Telegram и нажми /start")
 
     report_task = asyncio.create_task(daily_report_loop(control, storage, settings))
+    bridge_task = asyncio.create_task(redis_bridge.run(redis_client, control))
     try:
         await asyncio.Event().wait()
     finally:
         report_task.cancel()
+        bridge_task.cancel()
         await manager.stop_all()
         await control.app.stop()
+        await redis_client.close()
 
 
 if __name__ == "__main__":

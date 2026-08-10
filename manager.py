@@ -53,6 +53,10 @@ class Manager:
         # а не текстом от самого фарм-аккаунта (у обычных user-сессий callback-кнопки
         # физически не обрабатываются)
         self.bot_app = None
+        # выставляется в main.py вместе с bot_app: даёт воркерам live-статус-хранилище
+        # (Redis) и шину Pub/Sub-уведомлений для нового Dashboard — см. redis_client.py.
+        # None/выключен = функции ниже становятся no-op, автоматизация не зависит от Redis.
+        self.redis_client = None
 
     async def send_alert(self, owner_id: int, text: str, markup=None) -> None:
         if not self.bot_app or not owner_id:
@@ -61,6 +65,11 @@ class Manager:
             await self.bot_app.send_message(owner_id, text, reply_markup=markup)
         except Exception as e:  # noqa: BLE001
             print(f"[manager] не удалось отправить алерт {owner_id}: {e}")
+            return
+        # алерт уже доставлен пользователю напрямую (выше) — публикация в Redis нужна
+        # только чтобы уже ОТКРЫТЫЙ Dashboard-экран у этого owner_id перерисовался
+        if self.redis_client is not None:
+            await self.redis_client.publish("bot:notify", {"type": "alert", "owner_id": owner_id})
 
     # ---------- жизненный цикл ----------
     async def start_all(self) -> None:
@@ -87,6 +96,7 @@ class Manager:
         )
         worker.trade_runner = self.run_trade
         worker.alert_fn = self.send_alert
+        worker.redis_client = self.redis_client
         self.workers[acc_id] = worker
         print(f"[manager] подключаю «{acc.get('name')}» (id={acc_id})...")
         try:

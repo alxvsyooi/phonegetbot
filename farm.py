@@ -25,6 +25,7 @@ from storage import (
     EXCHANGE_WORD,
 )
 from common import MSK, parse_hhmm, seconds_until_msk, fmt_duration, clock, today_msk
+from ui_engine import Design
 
 BUFFER_SEC = 5  # буфер к кулдауну, чтобы не упереться ровно в секунду
 
@@ -462,11 +463,13 @@ class FarmModule:
                     self.last_card = f"⚠️ нет ответа ({clock()})"
                 else:
                     self.last_card = f"отправлено ({clock()})"
+                await self._publish_status(card_next_ts=self.card_next_ts, last_card=self.last_card)
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
                 self.last_card = f"ошибка: {e}"
                 self.card_next_ts = time.time() + 60
+                await self._publish_status(card_next_ts=self.card_next_ts, last_card=self.last_card)
                 await asyncio.sleep(5)
 
     # ---------- цикл рулетки ----------
@@ -502,11 +505,13 @@ class FarmModule:
                     self.last_roulette = (f"⚠️ нет ответа ({clock()})" if reply is None
                                           else f"⏳ кулдаун {fmt_duration(delay)} ({clock()})")
                 self.roulette_next_ts = time.time() + delay + BUFFER_SEC
+                await self._publish_status(roulette_next_ts=self.roulette_next_ts, last_roulette=self.last_roulette)
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
                 self.last_roulette = f"ошибка: {e}"
                 self.roulette_next_ts = time.time() + 60
+                await self._publish_status(roulette_next_ts=self.roulette_next_ts, last_roulette=self.last_roulette)
                 await asyncio.sleep(5)
 
     # ---------- цикл майнинга ----------
@@ -531,11 +536,13 @@ class FarmModule:
                 await self.collect_mining()
                 interval = max(60, int(self.account.get("mining_check_interval", 14400)))
                 self.mining_next_ts = time.time() + interval
+                await self._publish_status(mining_next_ts=self.mining_next_ts, last_mining=self.last_mining)
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
                 self.last_mining = f"ошибка: {e}"
                 self.mining_next_ts = time.time() + 60
+                await self._publish_status(mining_next_ts=self.mining_next_ts, last_mining=self.last_mining)
                 await asyncio.sleep(5)
 
     # ---------- ежедневная награда (свой якорь по mining_time, раз в сутки) ----------
@@ -554,6 +561,13 @@ class FarmModule:
                 if now.hour == hour and now.minute == minute and last_daily != now.date():
                     last_daily = now.date()
                     await self.collect_daily_reward()
+                # daily-цикл не хранит next_ts (решение — сравнение часов:минут по МСК на
+                # каждой итерации, см. выше) — для Dashboard считаем ту же самую следующую
+                # отметку через seconds_until_msk (common.py), не меняя условие срабатывания
+                await self._publish_status(
+                    daily_next_ts=time.time() + seconds_until_msk(hour, minute),
+                    last_daily=self.last_daily,
+                )
                 await asyncio.sleep(20)
             except asyncio.CancelledError:
                 raise
@@ -1238,10 +1252,11 @@ class FarmModule:
         owner_id = self.account.get("owner_id")
         if not owner_id or not self.account.get("alerts_enabled", True):
             return
-        text = (
-            f"⚠️ Магазин контейнеров — «{self.name}»: цена «{category_label}» "
-            f"выглядит подозрительно ({unit_price:,} ТОчек), пропустил категорию "
-            f"на всякий случай — проверь вручную.".replace(",", " ")
+        text = Design.alert_frame(
+            "⚠️", "МАГАЗИН КОНТЕЙНЕРОВ", self.name,
+            (f"<b>Причина:</b> цена «{category_label}» выглядит подозрительно "
+             f"({unit_price:,} ТОчек)").replace(",", " ") +
+            "\n<i>Действие: категория пропущена на всякий случай — проверь вручную</i>",
         )
         if self.alert_fn:
             try:
@@ -1255,7 +1270,8 @@ class FarmModule:
         owner_id = self.account.get("owner_id")
         if not owner_id or not self.account.get("alerts_enabled", True):
             return
-        text = f"⏰ Магазин контейнеров — «{self.name}»: ресток через {fmt_duration(cd)}."
+        text = Design.alert_frame("⏰", "РЕСТОК СКОРО", self.name,
+                                  f"<b>Магазин контейнеров:</b> ресток через <code>{fmt_duration(cd)}</code>")
         if not self.alert_fn:
             return
         try:
@@ -1538,9 +1554,9 @@ class FarmModule:
         owner_id = self.account.get("owner_id")
         if not owner_id or not self.account.get("alerts_enabled", True) or not self.alert_fn:
             return
-        msg = (
-            f"⚠️ Биржа P-Coins — «{self.name}»: неожиданный ответ, проверь вручную:\n\n"
-            f"«{text[:500]}»"
+        msg = Design.alert_frame(
+            "⚠️", "ОБМЕН P-COINS", self.name,
+            f"<b>Причина:</b> неожиданный ответ биржи, проверь вручную\n«{text[:500]}»",
         )
         try:
             await self.alert_fn(owner_id, msg, None)

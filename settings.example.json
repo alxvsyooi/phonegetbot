@@ -10,6 +10,7 @@
   "payout_to": 0,
   "payout_delay": 120,
   "main_account_id": 0,
+  "redis_url": "redis://localhost:6379/0",
   "trade": {
     "command": "/trade {target}",
     "step_timeout": 35,

@@ -70,6 +70,7 @@ class _WorkerBase:
         self.running = False
         self.trade_runner = None               # callable(farm_id) -> coroutine (ставит Manager)
         self.alert_fn = None                    # callable(owner_id, text, markup) -> coroutine (ставит Manager)
+        self.redis_client = None                # RedisClient | None (ставит Manager) — live-статус для Dashboard
 
         self._tasks: list[asyncio.Task] = []
         self._pending: dict[str, list[asyncio.Future]] = {}  # username -> очередь ожидающих (FIFO)
@@ -130,6 +131,15 @@ class _WorkerBase:
                 self.storage.save()
             except Exception:
                 pass
+
+    async def _publish_status(self, **fields) -> None:
+        """Write-through живого статуса модуля (next_ts/last_*) в Redis — только для
+        нового Dashboard/Celery-тика, само расписание/логика цикла не меняется и не
+        зависит от результата (см. redis_client.py — тихий no-op, если Redis выключен)."""
+        if not self.redis_client:
+            return
+        for field, value in fields.items():
+            await self.redis_client.set_status(self.id, field, value)
 
     def stats_line(self) -> str:
         st = self.account.get("stats", {})
