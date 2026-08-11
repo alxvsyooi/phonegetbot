@@ -26,6 +26,7 @@ from storage import (
 )
 from common import MSK, parse_hhmm, seconds_until_msk, fmt_duration, clock, today_msk
 from common import backoff_seconds as _backoff_seconds
+from common import msg_text as _common_msg_text
 from ui_engine import Design
 
 BUFFER_SEC = 5  # буфер к кулдауну, чтобы не упереться ровно в секунду
@@ -308,10 +309,7 @@ def _find_rarity_button(message, rarity_label: str) -> str | None:
     return None
 
 
-def _msg_text(message) -> str:
-    if message is None:
-        return ""
-    return getattr(message, "text", None) or getattr(message, "caption", None) or ""
+_msg_text = _common_msg_text  # см. common.py — общий хелпер, вынесен туда из этого файла
 
 
 def _exact_button(message, target: str) -> str | None:

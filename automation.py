@@ -116,6 +116,7 @@ class _WorkerBase:
         self.last_self_cmd = "—"
         self.last_shop = "—"
         self.last_repair = "—"
+        self.last_review = "—"  # отдельно от last_repair — см. RepairModule._maybe_leave_review
         self.last_upgrade = "—"
         self.last_accept = "—"
         self.last_farm_maintenance = "—"
@@ -484,6 +485,25 @@ class _WorkerBase:
                 if rows:
                     return False, msg  # другой экран с другими кнопками — не промежуточное сообщение
             return False, msg
+
+    # ---------- клик с повтором, если бот просто не спешит с ответом ----------
+    async def _click_retry(self, message, button_text: str, bot: str, cfg: dict, timeout: int = 15):
+        """Как _click_and_wait, но повторяет клик (не долбит наугад — тот же клик по
+        той же кнопке), если бот принял клик, но не ответил за timeout. Возвращает
+        (clicked, result); result is None, если так и не дождались ответа. Было
+        дословно продублировано в shop.py и repair.py — вынесено сюда."""
+        retry_delay = max(2, int(cfg.get("retry_interval", 5)))
+        attempts = max(1, int(cfg.get("retry_attempts", 3)))
+        clicked = False
+        for i in range(attempts):
+            clicked, result = await self._click_and_wait(message, button_text, bot, timeout=timeout)
+            if not clicked:
+                return False, None
+            if result is not None:
+                return True, result
+            if i < attempts - 1:
+                await asyncio.sleep(retry_delay)
+        return clicked, None
 
     # ---------- примитивы режима трейда (использует farm.py / trade.py) ----------
     def enter_trade_mode(self) -> None:
