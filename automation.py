@@ -19,10 +19,12 @@ import time
 from typing import Any
 
 from pyrogram import Client, filters
+from pyrogram.errors import AuthKeyUnregistered, UserDeactivated
 from pyrogram.handlers import MessageHandler, EditedMessageHandler
 
 from storage import CARDS_BOT, ACTION_DELAY
 from common import MSK, parse_hhmm, seconds_until_msk, fmt_duration, clock
+from common import backoff_seconds as _backoff_seconds
 from farm import FarmModule
 from autosend import AutosendModule
 from shop import ShopModule
@@ -32,6 +34,10 @@ from containers_api import ContainersApiModule
 # main.py использует эти имена как `from automation import MSK, _parse_hhmm`
 _parse_hhmm = parse_hhmm
 _seconds_until_msk = seconds_until_msk
+
+# Сессия отозвана/аккаунт заблокирован Telegram — повторные попытки бессмысленны,
+# в отличие от временных сетевых ошибок. См. _WorkerBase._handle_dead_session.
+_DEAD_SESSION_ERRORS = (AuthKeyUnregistered, UserDeactivated)
 
 
 class _WorkerBase:
@@ -75,10 +81,16 @@ class _WorkerBase:
         self._tasks: list[asyncio.Task] = []
         self._pending: dict[str, list[asyncio.Future]] = {}  # username -> очередь ожидающих (FIFO)
         self._bot_locks: dict[str, asyncio.Lock] = {}        # username -> лок на «отправил/кликнул + жду ответ»
+        self._farm_power_lock = asyncio.Lock()  # серилизует farm_maintenance_now/relieve_overload_now
+                                                 # (обе многошагово дёргают Выключить/Включить на ферме —
+                                                 # без лока могли интерлівиться и сбивать друг другу состояние)
+        self._shop_config_lock = asyncio.Lock()  # серилизует временную подмену phone_shop_* полей
+                                                  # (fill_farm_now) против параллельной ежедневной автозакупки
         self._trade_mode = False
         self._trade_queue: asyncio.Queue | None = None
         self._task_next: dict[int, float] = {}   # tid -> время следующего запуска
         self._container_alert_sent = False       # чтобы не слать «ресток скоро» повторно на один и тот же ресток
+        self._dead_session_alerted = False        # см. _handle_dead_session — один алерт, не спам на каждый цикл
 
         now = 0.0
         self.card_next_ts = now
@@ -140,6 +152,32 @@ class _WorkerBase:
             return
         for field, value in fields.items():
             await self.redis_client.set_status(self.id, field, value)
+
+    async def _handle_dead_session(self, exc: Exception) -> bool:
+        """Раньше сессия, отозванная/забаненная Telegram-ом, просто гоняла все циклы
+        по бесконечному молчаливому backoff-у (status оставался "работает"). Теперь —
+        один явный статус + один алерт владельцу, дальше циклы сами останавливаются
+        (self.running=False, они все проверяют `while self.running`)."""
+        if not isinstance(exc, _DEAD_SESSION_ERRORS):
+            return False
+        self.status = f"❌ сессия недействительна: {type(exc).__name__} — нужен перелогин"
+        if not self._dead_session_alerted:
+            self._dead_session_alerted = True
+            owner_id = self.account.get("owner_id")
+            if owner_id and self.alert_fn:
+                text = (
+                    "⚠️ <b>СЕССИЯ НЕДЕЙСТВИТЕЛЬНА</b>\n───\n"
+                    f"<b>Аккаунт:</b> <code>{html.escape(self.name)}</code>\n"
+                    f"<b>Причина:</b> <code>{type(exc).__name__}</code>\n"
+                    "<i>Действие: аккаунт остановлен, нужен перелогин (relogin.py "
+                    "или добавить заново по номеру/session string)</i>"
+                )
+                try:
+                    await self.alert_fn(owner_id, text, None)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[{self.name}] не удалось отправить алерт о мёртвой сессии: {e}")
+        self.running = False
+        return True
 
     def stats_line(self) -> str:
         st = self.account.get("stats", {})
@@ -344,7 +382,15 @@ class _WorkerBase:
             if throttle:
                 await asyncio.sleep(ACTION_DELAY)
             fut = self._register_wait(username)
-            await self.client.send_message(username, text)
+            try:
+                await self.client.send_message(username, text)
+            except Exception:
+                # send_message сам бросил (FloodWait/сеть/PeerIdInvalid) — future уже
+                # зарегистрирован в _pending, но ответа на него никогда не будет; без
+                # этой чистки следующий РЕАЛЬНЫЙ ответ бота (FIFO) доставался бы этому
+                # мёртвому future, а настоящий вызов ловил бы таймаут вместо ответа
+                self._forget_wait(username, fut)
+                raise
             try:
                 return await asyncio.wait_for(fut, timeout)
             except asyncio.TimeoutError:
@@ -360,10 +406,15 @@ class _WorkerBase:
         клик. Возвращает (clicked, result); result is None — клик прошёл, но бот не
         ответил за timeout."""
         async with self._lock_for_bot(bot):
+            # Регистрируем ожидание ДО клика (не после) — иначе если ответ бота
+            # прилетает, пока мы ещё внутри await message.click(...), _on_message
+            # не находит очередь на этот username и молча теряет сообщение (вызывающий
+            # код достаивает полный timeout впустую, хотя ответ уже пришёл и потерян)
+            fut = self._register_wait(bot)
             clicked = await self._try_click(message, button_text)
             if not clicked:
+                self._forget_wait(bot, fut)
                 return False, None
-            fut = self._register_wait(bot)
             try:
                 return True, await asyncio.wait_for(fut, timeout)
             except asyncio.TimeoutError:
@@ -386,14 +437,24 @@ class _WorkerBase:
         последнее увиденное сообщение, clicked_target — была ли реально нажата
         target_button."""
         async with self._lock_for_bot(bot):
+            # Регистрируем ожидание ДО клика — та же гонка "клик/ответ", что и в
+            # _click_and_wait выше (см. комментарий там)
+            fut = self._register_wait(bot)
             clicked = await self._try_click(message, button_text)
             if not clicked:
+                self._forget_wait(bot, fut)
                 return False, None
             msg = None
-            for _ in range(1 + max(0, extra_waits)):
-                fut = self._register_wait(bot)
+            # На повторных попытках (после первого безкнопочного ответа) timeout короче:
+            # если это была ПРОМЕЖУТОЧНАЯ заглушка — настоящий диалог обычно приходит
+            # быстро; если бот уже дал финальный ответ без кнопок — не тратим полный
+            # timeout впустую на каждой из extra_waits попыток подряд (было до 45с)
+            retry_timeout = max(3, timeout // 3)
+            for i in range(1 + max(0, extra_waits)):
+                if i > 0:
+                    fut = self._register_wait(bot)
                 try:
-                    msg = await asyncio.wait_for(fut, timeout)
+                    msg = await asyncio.wait_for(fut, timeout if i == 0 else retry_timeout)
                 except asyncio.TimeoutError:
                     self._forget_wait(bot, fut)
                     return False, msg

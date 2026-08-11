@@ -161,6 +161,10 @@ class ContainersApiModule:
             if res and res.get("success"):
                 bought_parts.append(f"{c_type} x{qty}")
                 self._bump("containers_bought", qty)
+                # "donate" тут, "donation" в farm.py — тот же счётчик, что и у
+                # клик-пути (см. _buy_category), просто разное имя категории в API
+                cat_key = "donation" if c_type == "donate" else c_type
+                self._bump(f"containers_bought_{cat_key}", qty)
                 limits["inv_current"] = int(limits.get("inv_current", 0)) + qty
                 if is_donate:
                     limits["donate_bought"] = int(limits.get("donate_bought", 0)) + qty

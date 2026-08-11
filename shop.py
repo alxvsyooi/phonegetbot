@@ -127,6 +127,16 @@ class ShopModule:
         return clicked, None
 
     async def buy_phones_now(self) -> str:
+        """Обёртка под _shop_config_lock — farm.py.fill_farm_now() тоже держит этот
+        лок, пока временно подменяет phone_shop_model/quantity/rarity для докупки
+        модели фермы; без общей блокировки ежедневный авто-цикл (или ручная кнопка)
+        мог сработать в это окно и купить телефоны фермы вместо настроенной
+        автозакупки. fill_farm_now зовёт _buy_phones_now_impl() напрямую — он уже
+        держит этот же лок сам, повторный async with здесь дал бы deadlock."""
+        async with self._shop_config_lock:
+            return await self._buy_phones_now_impl()
+
+    async def _buy_phones_now_impl(self) -> str:
         """Открыть магазин телефонов, выбрать настроенную редкость/модель и купить.
         Используется циклом и кнопкой «🏪 Купить телефоны сейчас»."""
         if not self.client or not self.running:

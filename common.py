@@ -9,10 +9,22 @@ import re
 import time
 from datetime import datetime, timedelta, timezone
 
+from pyrogram.errors import FloodWait
+
 from storage import MINING_HOUR, MINING_MINUTE
 
 MSK = timezone(timedelta(hours=3))
 TBILISI = timezone(timedelta(hours=4))
+
+
+def backoff_seconds(exc: Exception, default: int = 60) -> int:
+    """FloodWait называет ТОЧНОЕ время ожидания — уважаем его вместо плоского
+    default-бэкоффа в циклах farm.py/shop.py/repair.py/autosend.py/
+    containers_api.py, иначе повторный запрос почти гарантированно словит
+    флудвейт снова и продлит его ещё дальше."""
+    if isinstance(exc, FloodWait):
+        return int(exc.value) + 1
+    return default
 
 
 def parse_hhmm(value: str | None) -> tuple[int, int]:
