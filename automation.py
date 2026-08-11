@@ -124,6 +124,8 @@ class _WorkerBase:
         self.last_pcoin_exchange = "—"
         self.last_power_watchdog = "—"
         self.last_containers_api = "—"
+        self._containers_init_cache: tuple[str, float] | None = None  # (initData, получен_at) —
+                                                                        # см. ContainersApiModule._get_init_data
 
     # ---------- свойства ----------
     @property
