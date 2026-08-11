@@ -117,6 +117,7 @@ class _WorkerBase:
         self.last_shop = "—"
         self.last_repair = "—"
         self.last_review = "—"  # отдельно от last_repair — см. RepairModule._maybe_leave_review
+        self.last_equipment_repair = "—"  # отдельно от last_repair — см. RepairModule.repair_equipment_now
         self.last_upgrade = "—"
         self.last_accept = "—"
         self.last_farm_maintenance = "—"

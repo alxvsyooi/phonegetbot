@@ -561,36 +561,52 @@ class RepairModule:
         return (f"⚠️ «{model_name}»/«{breakage_btn}»: своего оборудования нет — "
                 f"чужую мастерскую не арендуем ({clock()})")
 
-    async def _repair_all_equipment(self) -> None:
+    async def _repair_all_equipment(self) -> str:
         """После запуска ремонта телефона используемый инструмент теряет прочность
         (-3 за ремонт) — чтобы мастерская не осталась без рабочего оборудования,
         заходим в «Моя мастерская -> Оборудование -> Починить всё оборудование»
         и подтверждаем (платно, но действующие ремонты не трогает — только
         простаивающий изношенный инструмент). Лучшая попытка: любая неудача на
-        этом пути не должна ломать уже успешно запущенный ремонт телефона."""
+        этом пути не должна ломать уже успешно запущенный ремонт телефона —
+        вызывается и как fire-and-forget шаг автопочинки (возврат игнорируется),
+        и как ручное действие repair_equipment_now() (возврат — статус для юзера)."""
         try:
             cfg = self.repair_cfg
             bot = cfg.get("bot") or CARDS_BOT
             workshop_cmd = cfg.get("workshop_command") or "Моя мастерская"
             panel = await self._send_and_wait(bot, workshop_cmd, timeout=15)
             if panel is None:
-                return
+                return f"⚠️ нет ответа на «{workshop_cmd}» ({clock()})"
             eq_btn = _find_button(panel, cfg.get("equipment_button", "оборудование"))
             if not eq_btn:
-                return
+                return f"⚠️ не нашёл кнопку «{cfg.get('equipment_button', 'оборудование')}» ({clock()})"
             clicked, eq = await self._click_retry(panel, eq_btn, bot, cfg)
             if not clicked or eq is None:
-                return
+                return f"⚠️ не открылся экран оборудования ({clock()})"
             fix_btn = _find_button(eq, cfg.get("repair_all_equipment_button", "починить всё оборудование"))
             if not fix_btn:
-                return
+                return f"✅ чинить нечего — оборудование уже исправно ({clock()})"
             clicked, confirm_msg = await self._click_retry(eq, fix_btn, bot, cfg)
             if not clicked or confirm_msg is None:
-                return
+                return f"⚠️ не нажалась «{fix_btn}» ({clock()})"
             confirm_btn = _find_button(confirm_msg, cfg.get("repair_all_confirm_button", "подтвердить"))
-            if confirm_btn:
-                await self._click_retry(confirm_msg, confirm_btn, bot, cfg)
+            if confirm_btn and not (await self._click_retry(confirm_msg, confirm_btn, bot, cfg))[0]:
+                return f"⚠️ не нажалось подтверждение ({clock()})"
+            return f"✅ оборудование починено ({clock()} {today_msk()})"
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            return f"ошибка: {e}"
+
+    async def repair_equipment_now(self) -> str:
+        """Ручной вызов «Починить оборудование» (▶️ Действия -> 🛠 Мастерская) —
+        та же цепочка кликов, что и автоматический шаг после ремонта телефона
+        (_repair_all_equipment), просто вызывается напрямую по кнопке."""
+        if not self.client or not self.running:
+            self.last_equipment_repair = "аккаунт не запущен"
+            return self.last_equipment_repair
+        if self._trade_mode:
+            self.last_equipment_repair = "идёт трейд — попробуй чуть позже"
+            return self.last_equipment_repair
+        self.last_equipment_repair = await self._repair_all_equipment()
+        return self.last_equipment_repair
