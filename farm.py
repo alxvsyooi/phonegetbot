@@ -2333,6 +2333,18 @@ class FarmModule:
             self.last_payout = f"ошибка вывода: {e}"
             return self.last_payout
 
+    async def payout_to_now(self, target: str) -> str:
+        """Как payout_all_now(), но с явным получателем вместо настроенного
+        payout_target — для «▶️ Действия -> Финансы -> Собрать с твинков»: твинк
+        платит СЮДА (главному аккаунту), независимо от своего обычного получателя."""
+        try:
+            return await self._run_payout(target, 100)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            self.last_payout = f"ошибка вывода: {e}"
+            return self.last_payout
+
     async def _run_payout(self, target: str, percent: int) -> str:
         bal = await self._send_and_wait(CARDS_BOT, BALANCE_WORD)
         total = parse_points(getattr(bal, "text", None) or getattr(bal, "caption", None))
