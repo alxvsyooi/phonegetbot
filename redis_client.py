@@ -24,6 +24,10 @@ def status_key(acc_id: int) -> str:
     return f"acct:{acc_id}:status"
 
 
+def stats_history_key(acc_id: int) -> str:
+    return f"acct:{acc_id}:stats_hist"
+
+
 class RedisClient:
     """Создаётся один раз в main.py и раздаётся по ссылке (Manager/ControlBot/AccountWorker),
     как уже сделано для Manager.bot_app — см. manager.py."""
@@ -78,6 +82,64 @@ class RedisClient:
             except (TypeError, ValueError):
                 out[k] = v
         return out
+
+    # ---------- история статистики (для «Статистика за период», см. controlbot.py) ----------
+    # sorted set: score = unix-таймстамп снимка, member = JSON-снимок account["stats"] на тот
+    # момент. «Сколько получено за период» = текущая сумма МИНУС ближайший снимок ДО начала
+    # периода — без этого пришлось бы отдельно копить дельты по каждому периоду.
+    async def record_stats_snapshot(self, acc_id: int, stats: dict[str, Any], ts: float | None = None) -> None:
+        if not self.enabled:
+            return
+        ts = ts if ts is not None else time.time()
+        try:
+            await self._r.zadd(stats_history_key(acc_id), {json.dumps(stats): ts})
+        except Exception as e:  # noqa: BLE001
+            self._warn_once(e)
+
+    async def stats_snapshot_before(self, acc_id: int, ts: float) -> dict[str, Any] | None:
+        """Ближайший снимок с временем <= ts, или None, если история не тянется так далеко назад."""
+        if not self.enabled:
+            return None
+        try:
+            rows = await self._r.zrevrangebyscore(stats_history_key(acc_id), ts, "-inf", start=0, num=1)
+        except Exception as e:  # noqa: BLE001
+            self._warn_once(e)
+            return None
+        if not rows:
+            return None
+        try:
+            return json.loads(rows[0])
+        except (TypeError, ValueError):
+            return None
+
+    async def earliest_stats_snapshot(self, acc_id: int) -> tuple[float, dict[str, Any]] | None:
+        """Самый старый снимок в истории — используется как фоллбэк, когда запрошенный период
+        (напр. «месяц») длиннее, чем реально накоплено с момента включения этой фичи."""
+        if not self.enabled:
+            return None
+        try:
+            rows = await self._r.zrange(stats_history_key(acc_id), 0, 0, withscores=True)
+        except Exception as e:  # noqa: BLE001
+            self._warn_once(e)
+            return None
+        if not rows:
+            return None
+        member, score = rows[0]
+        try:
+            return float(score), json.loads(member)
+        except (TypeError, ValueError):
+            return None
+
+    async def prune_stats_history(self, acc_id: int, keep_seconds: float) -> None:
+        """Не хранить снимки старше keep_seconds — история нужна только на самое длинное
+        поддерживаемое окно (месяц), дальше место можно освобождать."""
+        if not self.enabled:
+            return
+        try:
+            cutoff = time.time() - keep_seconds
+            await self._r.zremrangebyscore(stats_history_key(acc_id), "-inf", cutoff)
+        except Exception as e:  # noqa: BLE001
+            self._warn_once(e)
 
     async def publish(self, channel: str, payload: dict[str, Any]) -> None:
         if not self.enabled:
