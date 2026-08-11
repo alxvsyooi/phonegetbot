@@ -290,6 +290,49 @@ class _TradeCore:
         self._log(f"в коллекции осталось: {n}")
         return n
 
+    async def _send_trade_command(self, target: str) -> None:
+        """Шаг 1, общий для TradeSession/SoloTradeSession: отправить /trade {target}
+        и залогировать немедленный ответ, если есть (не блокирует — реальный оффер
+        приходит отдельным сообщением и ловится дальше вызывающим _run())."""
+        c = self.cfg
+        self._progress(f"шаг 1: отправляю {c['command'].replace('{target}', target)}")
+        await self.farm.trade_send(c["command"].replace("{target}", target))
+        ack = await self.farm.trade_wait(lambda m: True, 8)
+        if ack is not None:
+            self._log(f"ответ на /trade: {msg_text(ack)[:160]!r}")
+
+    # ---------- общая обвязка run(): участники трейд-режима, общий таймаут, финалы ----------
+    def _trade_participants(self) -> list:
+        """Кого перевести в _trade_mode на время сессии — переопределяется в подклассах
+        (SoloTradeSession: только farm; TradeSession: farm + main)."""
+        return [self.farm]
+
+    def _start_text(self) -> str:
+        return "трейд начат…"
+
+    def _overall_timeout(self) -> float:
+        raise NotImplementedError
+
+    async def run(self) -> str:
+        participants = self._trade_participants()
+        if any(p._trade_mode for p in participants):
+            return "трейд уже выполняется"
+        for p in participants:
+            p.enter_trade_mode()
+        self.farm.last_exchange = f"🔄 {self._start_text()}"
+        try:
+            result = await asyncio.wait_for(self._run(), timeout=self._overall_timeout())
+        except asyncio.TimeoutError:
+            result = f"таймаут на: {self._last_step}"
+        except Exception as e:  # noqa: BLE001
+            result = f"ошибка на «{self._last_step}»: {e}"
+        finally:
+            for p in participants:
+                p.exit_trade_mode()
+        self.farm.last_exchange = f"🔄 {result} ({time.strftime('%H:%M:%S')})"
+        self._log(result)
+        return result
+
 
 class TradeSession(_TradeCore):
     """Двусторонняя автоматизация: получатель тоже подключён к боту (свой аккаунт)."""
@@ -299,39 +342,21 @@ class TradeSession(_TradeCore):
         self.main = main
         self.main_id = main_id
 
-    async def run(self) -> str:
-        if self.farm._trade_mode or self.main._trade_mode:
-            return "трейд уже выполняется"
-        self.farm.enter_trade_mode()
-        self.main.enter_trade_mode()
-        self.farm.last_exchange = "🔄 трейд начат…"
+    def _trade_participants(self) -> list:
+        return [self.farm, self.main]
+
+    def _overall_timeout(self) -> float:
         # общий потолок должен покрывать offer_wait_timeout (может быть заметно больше
         # step_timeout, см. _run) плюс запас на остальные шаги — раньше он считался только
         # от step_timeout и мог сработать РАНЬШЕ, чем истечёт ожидание оффера на шаге 2
         offer_timeout = int(self.cfg.get("offer_wait_timeout", 90))
-        overall_timeout = offer_timeout + self.timeout * 12
-        try:
-            result = await asyncio.wait_for(self._run(), timeout=overall_timeout)
-        except asyncio.TimeoutError:
-            result = f"таймаут на: {self._last_step}"
-        except Exception as e:  # noqa: BLE001
-            result = f"ошибка на «{self._last_step}»: {e}"
-        finally:
-            self.farm.exit_trade_mode()
-            self.main.exit_trade_mode()
-        self.farm.last_exchange = f"🔄 {result} ({time.strftime('%H:%M:%S')})"
-        self._log(result)
-        return result
+        return offer_timeout + self.timeout * 12
 
     async def _run(self) -> str:
         c = self.cfg
         uname = (self.main.account.get("username") or "").lstrip("@")
         target = f"@{uname}" if uname else str(self.main_id)
-        self._progress(f"шаг 1: отправляю {c['command'].replace('{target}', target)}")
-        await self.farm.trade_send(c["command"].replace("{target}", target))
-        ack = await self.farm.trade_wait(lambda m: True, 8)
-        if ack is not None:
-            self._log(f"ответ на /trade: {msg_text(ack)[:160]!r}")
+        await self._send_trade_command(target)
 
         # доставка уведомления игрой иногда запаздывает, особенно если получатель как раз
         # занят своими фоновыми циклами (карточки/майнинг/контейнеры) — отдельный, более
@@ -386,37 +411,21 @@ class SoloTradeSession(_TradeCore):
         super().__init__(farm, cfg)
         self.target = target.strip()
 
-    async def run(self) -> str:
-        if self.farm._trade_mode:
-            return "трейд уже выполняется"
-        self.farm.enter_trade_mode()
-        self.farm.last_exchange = "🔄 трейд начат (получатель вне бота)…"
+    def _start_text(self) -> str:
+        return "трейд начат (получатель вне бота)…"
+
+    def _overall_timeout(self) -> float:
         # solo_accept_timeout используется ДВАЖДЫ внутри _run (ждём принятия оффера И
         # ждём завершения обмена человеком) — общий потолок должен покрывать ОБА раза,
         # раньше считался только от step_timeout и мог сработать раньше их суммы
         accept_timeout = int(self.cfg.get("solo_accept_timeout", 300))
-        overall_timeout = accept_timeout * 2 + self.timeout * 6
-        try:
-            result = await asyncio.wait_for(self._run(), timeout=overall_timeout)
-        except asyncio.TimeoutError:
-            result = f"таймаут на: {self._last_step}"
-        except Exception as e:  # noqa: BLE001
-            result = f"ошибка на «{self._last_step}»: {e}"
-        finally:
-            self.farm.exit_trade_mode()
-        self.farm.last_exchange = f"🔄 {result} ({time.strftime('%H:%M:%S')})"
-        self._log(result)
-        return result
+        return accept_timeout * 2 + self.timeout * 6
 
     async def _run(self) -> str:
         c = self.cfg
         raw = self.target.lstrip("@")
         target = raw if raw.isdigit() else f"@{raw}"  # numeric id как есть, иначе @username
-        self._progress(f"шаг 1: отправляю {c['command'].replace('{target}', target)}")
-        await self.farm.trade_send(c["command"].replace("{target}", target))
-        ack = await self.farm.trade_wait(lambda m: True, 8)
-        if ack is not None:
-            self._log(f"ответ на /trade: {msg_text(ack)[:160]!r}")
+        await self._send_trade_command(target)
 
         # получатель не подключён к боту — должен принять оффер вручную,
         # даём больше времени на реакцию человека
