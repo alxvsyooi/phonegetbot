@@ -10,10 +10,12 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import time
+from datetime import datetime, timedelta
 
 from storage import CARDS_BOT, ROULETTE_BOT, PAY_CONFIRM_BUTTON
-from common import parse_hhmm, seconds_until_msk, fmt_duration, clock
+from common import parse_hhmm, fmt_duration, clock, MSK
 
 
 class AutosendModule:
@@ -65,17 +67,44 @@ class AutosendModule:
             self.last_self_cmd = f"ошибка .{verb}: {e}"
 
     # ---------- произвольные задачи по расписанию ----------
+    @staticmethod
+    def _task_jitter(task: dict, ts: float) -> float:
+        """Случайный сдвиг ±jitter_seconds (поле задачи, по умолчанию 0 — без
+        изменений). Если один и тот же шаблон задачи стоит на нескольких
+        аккаунтах, без разброса они бы стучались боту секунда в секунду —
+        jitter размазывает срабатывания по времени."""
+        jitter = int(task.get("jitter_seconds", 0) or 0)
+        return ts + random.uniform(-jitter, jitter) if jitter > 0 else ts
+
+    @staticmethod
+    def _next_daily_ts(task: dict) -> float:
+        """Ближайшее ЧЧ:ММ (МСК) в будущем, с опциональным фильтром по дням
+        недели: task["days"] — список int 0=пн..6=вс (datetime.weekday()),
+        пусто/не задано — каждый день (как раньше)."""
+        h, m = parse_hhmm(task.get("time"))
+        now = datetime.now(MSK)
+        candidate = now.replace(hour=h, minute=m, second=0, microsecond=0)
+        if candidate <= now:
+            candidate += timedelta(days=1)
+        days = task.get("days")
+        if days:
+            allowed = {int(d) % 7 for d in days}
+            for _ in range(7):
+                if candidate.weekday() in allowed:
+                    break
+                candidate += timedelta(days=1)
+        return candidate.timestamp()
+
     def _task_init_next(self, task: dict) -> float:
         if task.get("mode") == "daily":
-            h, m = parse_hhmm(task.get("time"))
-            return time.time() + seconds_until_msk(h, m)
-        return time.time()  # интервальная: запустить сразу
+            return self._task_jitter(task, self._next_daily_ts(task))
+        return time.time()  # интервальная: запустить сразу (без джиттера — это первый запуск)
 
     def _task_after_next(self, task: dict) -> float:
         if task.get("mode") == "daily":
-            h, m = parse_hhmm(task.get("time"))
-            return time.time() + seconds_until_msk(h, m)
-        return time.time() + max(10, int(task.get("interval", 3600)))
+            return self._task_jitter(task, self._next_daily_ts(task))
+        base = time.time() + max(10, int(task.get("interval", 3600)))
+        return self._task_jitter(task, base)
 
     async def _tasks_loop(self) -> None:
         while self.running:

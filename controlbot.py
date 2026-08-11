@@ -613,10 +613,18 @@ class ControlBot:
         rows.append([_btn("⬅️ Назад", f"actions:{aid}")])
         return InlineKeyboardMarkup(rows)
 
-    @staticmethod
-    def _task_sched(t: dict) -> str:
-        return (f"{t.get('interval', 3600)}с" if t.get("mode") == "interval"
+    _WEEKDAY_LABELS = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
+
+    @classmethod
+    def _task_sched(cls, t: dict) -> str:
+        base = (f"{t.get('interval', 3600)}с" if t.get("mode") == "interval"
                 else f"{t.get('time', '00:00')} МСК")
+        days = t.get("days")
+        if days:
+            base += " (" + "/".join(cls._WEEKDAY_LABELS[int(d) % 7] for d in days) + ")"
+        if int(t.get("jitter_seconds", 0) or 0) > 0:
+            base += f" ±{t['jitter_seconds']}с"
+        return base
 
     def _tasks_menu(self, acc: dict) -> InlineKeyboardMarkup:
         aid = acc["id"]
@@ -1099,6 +1107,12 @@ class ControlBot:
                 tid = int(data.split(":")[2])
                 acc["tasks"] = [t for t in acc.get("tasks", []) if t.get("id") != tid]
                 self.storage.save()
+                w = self.manager.workers.get(aid)
+                if w:
+                    # если этот id переиспользуют для новой задачи (_handle_addtask
+                    # берёт max(existing id)+1 — удалённый id снова свободен), воркер
+                    # не должен унаследовать старое время следующего запуска
+                    w._task_next.pop(tid, None)
                 await q.message.edit_text(f"🧩 Задачи — <b>{acc.get('name')}</b>\n───",
                                           reply_markup=self._tasks_menu(acc))
             await q.answer()
