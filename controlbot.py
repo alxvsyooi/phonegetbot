@@ -37,16 +37,29 @@ def _btn(text: str, data: str) -> InlineKeyboardButton:
 # постоянная кнопка снизу экрана — жмёшь и сразу шлётся «/start», не нужно набирать
 _START_KEYBOARD = ReplyKeyboardMarkup([[KeyboardButton("/start")]], resize_keyboard=True)
 
+_LOGO_PATH = os.path.join(BASE_DIR, "assets", "nexuscards_logo.jpg")
+
 _WELCOME_TEXT = (
-    "👋 Привет! Я бот-помощник для игры <b>PhoneGet</b> в Telegram.\n\n"
-    "Что я умею — два независимых модуля, каждый включается отдельно:\n\n"
-    "📱 <b>Фарм карточек</b> — сам забирает карточки, крутит рулетку, собирает "
-    "урожай с фермы и ежедневную награду, следит за магазином контейнеров.\n\n"
-    "📨 <b>Автоотправка</b> — шлёт любые сообщения любым ботам по расписанию, "
-    "или по короткой команде вроде «.trade»/«.pay», которую ты печатаешь в чате "
-    "с кем-то — я сам подставлю получателя и отправлю нужную команду.\n\n"
-    "👇 Жми «📋 Мои аккаунты», чтобы добавить первый аккаунт."
+    "👋 Добро пожаловать в NEXUSCARDS!\n\n"
+    "Запустите автоматический фарм ресурсов и карточек на всех ваших "
+    "Telegram-аккаунтах без ручной рутины.\n\n"
+    "<blockquote>🛠 Как начать за 3 шага:\n"
+    "1. Нажмите кнопку «🚀 Начать работу»\n"
+    "2. Добавьте аккаунт (по номеру или сессии)\n"
+    "3. Включите нужные модули автосбора</blockquote>\n\n"
+    "Готовы настроить свою ферму?"
 )
+
+_WELCOME_KEYBOARD = InlineKeyboardMarkup([
+    [_btn("🚀 Начать работу", "welcome_start")],
+    [_btn("⚙️ Возможности", "welcome_features"), _btn("❓ Помощь и FAQ", "welcome_faq")],
+])
+
+# заглушки — содержимое пока не определено (см. обсуждение), кнопки ведут сюда,
+# чтобы не выдумывать наполнение самостоятельно
+_FEATURES_STUB_TEXT = "⚙️ <b>Возможности</b>\n───\n🚧 Раздел в разработке."
+_FAQ_STUB_TEXT = "❓ <b>Помощь и FAQ</b>\n───\n🚧 Раздел в разработке."
+_WELCOME_BACK_KEYBOARD = InlineKeyboardMarkup([[_btn("⬅️ Назад", "welcome_back")]])
 
 
 class ControlBot:
@@ -85,16 +98,13 @@ class ControlBot:
             uid = m.from_user.id
             self.states.pop(uid, None)
             if not self._my_accounts(uid):
-                # первый заход — аккаунтов ещё нет: объясняем, что бот умеет, и
-                # закрепляем снизу постоянную кнопку «/start» (сообщение может нести
-                # только ОДИН тип клавиатуры — reply или inline, не оба сразу, поэтому
-                # первый раз это два сообщения; дальше держится и без повтора)
-                await m.reply(_WELCOME_TEXT, reply_markup=_START_KEYBOARD)
-                await self._open_dashboard(m)
-                return
-            # уже есть хотя бы один аккаунт — сразу Dashboard, без повторного онбординга
-            # на каждый /start (постоянная кнопка снизу уже закреплена с первого раза)
-            await self._open_dashboard(m)
+                # первый заход — закрепляем снизу постоянную кнопку «/start» отдельным
+                # сообщением (сообщение может нести только ОДИН тип клавиатуры — reply
+                # или inline, не оба сразу); дальше держится и без повтора
+                await m.reply("👋", reply_markup=_START_KEYBOARD)
+            # приветственный экран NEXUSCARDS — на каждый /start (и для новых, и для
+            # уже настроенных аккаунтов); переход к Dashboard — через «🚀 Начать работу»
+            await m.reply_photo(_LOGO_PATH, caption=_WELCOME_TEXT, reply_markup=_WELCOME_KEYBOARD)
 
         @self.app.on_message(filters.private & auth & ~filters.command("start"))
         async def _text(_c, m: Message):
@@ -210,12 +220,13 @@ class ControlBot:
             [_btn("📊 Статистика", f"dashstats:{main['id']}"), _btn("🔄 Обновить", "home")],
         ])
 
-    async def _open_dashboard(self, m: Message) -> None:
-        """Первый показ дэшборда — новым сообщением (после /start редактировать нечего)."""
-        uid = m.from_user.id
+    async def _open_dashboard(self, uid: int, chat_id: int) -> None:
+        """Первый показ дэшборда — новым сообщением (приветственный экран NEXUSCARDS —
+        фото с подписью, дэшборд поверх него не отредактировать, так что это отдельное
+        текстовое сообщение, открывается по кнопке «🚀 Начать работу»)."""
         text = await self._dashboard_text(uid)
         markup = self._dashboard_menu(uid)
-        sent = await m.reply(text, reply_markup=markup)
+        sent = await self.app.send_message(chat_id, text, reply_markup=markup)
         self.dashboards.register(uid, sent.chat.id, sent.id)
         self.render_engine.should_render(sent.chat.id, "dashboard", text, markup)  # засеваем кэш
 
@@ -702,6 +713,19 @@ class ControlBot:
         data = q.data
         uid = q.from_user.id
         try:
+            if data == "welcome_start":
+                self.states.pop(uid, None)
+                await self._open_dashboard(uid, q.message.chat.id)
+                return await q.answer()
+            if data == "welcome_features":
+                await q.message.edit_caption(_FEATURES_STUB_TEXT, reply_markup=_WELCOME_BACK_KEYBOARD)
+                return await q.answer()
+            if data == "welcome_faq":
+                await q.message.edit_caption(_FAQ_STUB_TEXT, reply_markup=_WELCOME_BACK_KEYBOARD)
+                return await q.answer()
+            if data == "welcome_back":
+                await q.message.edit_caption(_WELCOME_TEXT, reply_markup=_WELCOME_KEYBOARD)
+                return await q.answer()
             if data == "home":
                 self.states.pop(uid, None)
                 await self._redraw_dashboard(q)
