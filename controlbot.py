@@ -55,11 +55,58 @@ _WELCOME_KEYBOARD = InlineKeyboardMarkup([
     [_btn("⚙️ Возможности", "welcome_features"), _btn("❓ Помощь и FAQ", "welcome_faq")],
 ])
 
-# заглушки — содержимое пока не определено (см. обсуждение), кнопки ведут сюда,
-# чтобы не выдумывать наполнение самостоятельно
+# заглушка — содержимое «Возможности» пока не определено (см. обсуждение), кнопка
+# ведёт сюда, чтобы не выдумывать наполнение самостоятельно
 _FEATURES_STUB_TEXT = "⚙️ <b>Возможности</b>\n───\n🚧 Раздел в разработке."
-_FAQ_STUB_TEXT = "❓ <b>Помощь и FAQ</b>\n───\n🚧 Раздел в разработке."
 _WELCOME_BACK_KEYBOARD = InlineKeyboardMarkup([[_btn("⬅️ Назад", "welcome_back")]])
+
+# ---------- ❓ База знаний и поддержка ----------
+_FAQ_TEXT = (
+    "❓ <b>БАЗА ЗНАНИЙ И ПОДДЕРЖКА</b>\n\n"
+    "Выберите нужную тему ниже, чтобы получить мгновенный ответ, или свяжитесь "
+    "с владельцем бота напрямую.\n\n"
+    "<blockquote>💡 Перед обращением в саппорт рекомендуем проверить статус "
+    "вашей сессии и прочитать ответы на частые вопросы.</blockquote>"
+)
+
+_FAQ_TOPICS = [
+    ("session", "🔐 Как правильно добавить .session?",
+     "🔐 <b>ПОДКЛЮЧЕНИЕ .SESSION</b>\n\n"
+     "1. Перейдите в «Мои аккаунты» ➔ «+ Session».\n"
+     "2. Отправьте боту файл <code>.session</code> и файл <code>.json</code> (если используется прокси).\n"
+     "3. Бот проверит валидность и присвоит аккаунту статус 🟢 ONLINE.\n\n"
+     "⚠️ Не используйте сессии, которые одновременно активны в других сторонних софтах."),
+    ("offline", "🔴 Что делать, если статус «OFFLINE»?",
+     "🔴 <b>СТАТУС «OFFLINE»</b>\n\n"
+     "Основные причины:\n"
+     "• Telegram завершил активную сессию (слетел авторизационный ключ).\n"
+     "• Временный сбой прокси или IP-адреса.\n"
+     "• Telegram затребовал повторную верификацию.\n\n"
+     "Решение: перейдите в настройки аккаунта и нажмите «Переподключить» или "
+     "добавьте <code>.session</code> заново."),
+    ("security", "🛡 Безопасность: банят ли за автосбор?",
+     "🛡 <b>БЕЗОПАСНОСТЬ И ЛИМИТЫ</b>\n\n"
+     "PHONEGET AUTOMATOR использует рандомизированные задержки между действиями "
+     "(таймеры) и эмулирует поведение реального пользователя.\n\n"
+     "Для 100% безопасности:\n"
+     "• Не подключайте более 3–5 аккаунтов с одного IP (используйте прокси).\n"
+     "• Не ставьте слишком частый интервал фарминга на «молодых» аккаунтах."),
+]
+
+
+def _faq_menu() -> InlineKeyboardMarkup:
+    rows = [[_btn(label, f"faqtopic:{key}")] for key, label, _ in _FAQ_TOPICS]
+    rows.append([_btn("👨‍💻 Написать админу (Прямой контакт)", "faqcontact")])
+    rows.append([_btn("⬅️ Назад в меню", "welcome_back")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _faq_topic_text(key: str) -> str:
+    return next((t for k, _, t in _FAQ_TOPICS if k == key), _FAQ_TEXT)
+
+
+_FAQ_TOPIC_BACK_KEYBOARD = InlineKeyboardMarkup([[_btn("⬅️ Назад", "welcome_faq")]])
+_ADMIN_CONTACT_USERNAME = "phntmk"  # для кнопки «👨‍💻 Написать админу» в FAQ
 
 
 class ControlBot:
@@ -321,6 +368,16 @@ class ControlBot:
         except Exception as e:  # noqa: BLE001
             print(f"[dashboard] не удалось обновить {user_id}: {e}")
 
+    def _accounts_text(self, uid: int) -> str:
+        n = len(self._my_accounts(uid))
+        if n == 0:
+            return (
+                "📱 <b>ПОДКЛЮЧЕНИЕ АККАУНТА</b>\n\n"
+                "У вас пока нет добавленных профилей. Выберите способ авторизации "
+                "первого аккаунта:"
+            )
+        return f"📋 <b>Мои аккаунты</b> (<code>{n}</code>)\n───"
+
     def _accounts_menu(self, uid: int) -> InlineKeyboardMarkup:
         rows = []
         accs = sorted(self._my_accounts(uid), key=lambda a: 0 if a.get("is_main") else 1)
@@ -337,8 +394,8 @@ class ControlBot:
                 rows.append(acc_buttons[i:i + 2])
         else:
             rows.extend([b] for b in acc_buttons)
-        rows.append([_btn("➕ По номеру", "add_phone"), _btn("➕ Session", "add_session")])
-        rows.append([_btn("➕ Файл сессии", "add_sessionfile")])
+        rows.append([_btn("📱 По номеру телефона", "add_phone"),
+                     _btn("🔑 По Pyrogram / Telethon Session", "add_session")])
         if self._my_accounts(uid):
             rows.append([_btn("☎️ Показать все номера", "allphones")])
         rows.append([_btn("⬅️ Назад", "home")])
@@ -831,7 +888,21 @@ class ControlBot:
                 await q.message.edit_caption(_FEATURES_STUB_TEXT, reply_markup=_WELCOME_BACK_KEYBOARD)
                 return await q.answer()
             if data == "welcome_faq":
-                await q.message.edit_caption(_FAQ_STUB_TEXT, reply_markup=_WELCOME_BACK_KEYBOARD)
+                await q.message.edit_caption(_FAQ_TEXT, reply_markup=_faq_menu())
+                return await q.answer()
+            if data.startswith("faqtopic:"):
+                key = data.split(":")[1]
+                await q.message.edit_caption(_faq_topic_text(key), reply_markup=_FAQ_TOPIC_BACK_KEYBOARD)
+                return await q.answer()
+            if data == "faqcontact":
+                markup = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("👨‍💻 Открыть чат с администратором",
+                                          url=f"https://t.me/{_ADMIN_CONTACT_USERNAME}")],
+                    [_btn("⬅️ Назад", "welcome_faq")],
+                ])
+                text = ("👨‍💻 <b>Прямой контакт</b>\n───\n"
+                        "Нажмите кнопку ниже, чтобы открыть чат с администратором.")
+                await q.message.edit_caption(text, reply_markup=markup)
                 return await q.answer()
             if data == "welcome_back":
                 await q.message.edit_caption(_WELCOME_TEXT, reply_markup=_WELCOME_KEYBOARD)
@@ -841,9 +912,7 @@ class ControlBot:
                 await self._redraw_dashboard(q)
                 return await q.answer()
             if data == "list":
-                n = len(self._my_accounts(uid))
-                await q.message.edit_text(f"📋 <b>Мои аккаунты</b> (<code>{n}</code>)\n───",
-                                          reply_markup=self._accounts_menu(uid))
+                await q.message.edit_text(self._accounts_text(uid), reply_markup=self._accounts_menu(uid))
                 return await q.answer()
             if data == "add_phone":
                 self.states[uid] = {
@@ -854,22 +923,17 @@ class ControlBot:
                                           "в формате +79991234567:")
                 return await q.answer()
             if data == "add_session":
+                # один шаг принимает И session string текстом, И .session файл документом —
+                # тип определяется по самому сообщению, см. _handle_add
                 self.states[uid] = {
                     "flow": "add", "method": "session", "step": "session",
                     "data": {"api_id": int(self.settings["api_id"]), "api_hash": self.settings["api_hash"]},
                 }
-                await q.message.edit_text("➕ Добавление по session string.\nОтправь <b>session string</b> "
-                                          "(Pyrogram):")
-                return await q.answer()
-            if data == "add_sessionfile":
-                self.states[uid] = {
-                    "flow": "add", "method": "sessionfile", "step": "file",
-                    "data": {"api_id": int(self.settings["api_id"]), "api_hash": self.settings["api_hash"]},
-                }
                 await q.message.edit_text(
-                    "➕ Добавление по файлу сессии (.session).\nПришли сам файл — api_id/api_hash не нужны, "
-                    "используется тот же, что у управляющего бота. Если файл создан под другим api_id, "
-                    "подключение может не сработать (пришлю ошибку) — тогда добавь по session string вручную.")
+                    "🔑 Добавление по Session.\nПришли <b>session string</b> текстом (Pyrogram/Telethon) "
+                    "ИЛИ файл <b>.session</b> документом — определю сам по типу сообщения. Для файла "
+                    "api_id/api_hash не нужны (берём те же, что у управляющего бота — если файл создан "
+                    "под другим api_id, подключение может не сработать, тогда пришли session string):")
                 return await q.answer()
             if data == "allphones":
                 await self._start_all_phones(q, uid)
@@ -2002,13 +2066,19 @@ class ControlBot:
         uid = m.from_user.id
         step = state["step"]
         data = state["data"]
-        # шаг "file" ждёт документ, не текст — m.text может быть None, проверяем ДО val=...
-        if step == "file":
+        # шаг "session" принимает И session string текстом, И .session файл документом —
+        # объединённая точка входа «🔑 По Pyrogram / Telethon Session» (см. add_session);
+        # документ проверяем ДО val=... (m.text может быть None для файла)
+        if step == "session" and m.document:
             await self._handle_add_sessionfile(m, state)
             return
         val = (m.text or "").strip()
         try:
             if step == "session":
+                if not val:
+                    await m.reply("Пришли session string текстом ИЛИ файл .session документом. "
+                                  "Ещё раз, либо /start чтобы отменить:")
+                    return
                 data["session_string"] = val
                 await self._finalize_add(m, data)
             elif step == "phone":
