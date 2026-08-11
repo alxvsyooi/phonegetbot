@@ -183,14 +183,6 @@ class _WorkerBase:
         self.running = False
         return True
 
-    def stats_line(self) -> str:
-        st = self.account.get("stats", {})
-        return (
-            f"📱 {st.get('phones', 0)} (⭐{st.get('good_phones', 0)}) | "
-            f"🎰 {st.get('roulette', 0)} | ⛏ {st.get('mining', 0)} | 🎁 {st.get('daily', 0)} | "
-            f"💸 {st.get('paid', 0)} | 🔄 {st.get('exchanged', 0)} | 📦 {st.get('containers_bought', 0)}"
-        )
-
     # ---------- жизненный цикл ----------
     async def start(self) -> None:
         if self.running:

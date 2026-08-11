@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import time
 from datetime import datetime
 
 from automation import MSK, _parse_hhmm
@@ -65,6 +66,28 @@ async def daily_report_loop(control: ControlBot, storage: Storage, settings: dic
         except Exception as e:  # noqa: BLE001
             print(f"[report] ошибка: {e}")
         await asyncio.sleep(20)
+
+
+async def stats_snapshot_loop(redis_client: RedisClient, storage: Storage,
+                               interval: int = 900, retention_days: int = 35) -> None:
+    """Копит историю account['stats'] (кумулятивная всё-время статистика) в Redis —
+    основа для экрана «Статистика за период» (час/7ч/день/неделя/месяц), см.
+    RedisClient.record_stats_snapshot и ControlBot._stats_period_text. Снимок каждые
+    interval секунд достаточен даже для окна «час» (15 мин — разумный компромисс между
+    точностью и объёмом); retention_days ограничивает хранимую историю самым длинным
+    поддерживаемым окном (месяц) с запасом. Не запускается вообще, если Redis выключен —
+    без него «Статистика за период» просто покажет «нет истории», ничего не ломается."""
+    if not redis_client.enabled:
+        return
+    while True:
+        try:
+            now = time.time()
+            for acc in storage.accounts:
+                await redis_client.record_stats_snapshot(acc["id"], acc.get("stats", {}), now)
+                await redis_client.prune_stats_history(acc["id"], retention_days * 86400)
+        except Exception as e:  # noqa: BLE001
+            print(f"[stats_history] ошибка: {e}")
+        await asyncio.sleep(interval)
 
 
 def _migrate_owners(storage: Storage, settings: dict) -> None:
@@ -153,12 +176,14 @@ async def main() -> None:
     report_task = asyncio.create_task(daily_report_loop(control, storage, settings))
     bridge_task = asyncio.create_task(redis_bridge.run(redis_client, control))
     watchdog_task = asyncio.create_task(manager.watchdog_loop())
+    stats_task = asyncio.create_task(stats_snapshot_loop(redis_client, storage))
     try:
         await asyncio.Event().wait()
     finally:
         report_task.cancel()
         bridge_task.cancel()
         watchdog_task.cancel()
+        stats_task.cancel()
         await manager.stop_all()
         await control.app.stop()
         await redis_client.close()

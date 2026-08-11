@@ -21,7 +21,7 @@ from pyrogram.errors import (
     SessionPasswordNeeded, PhoneCodeInvalid, PhoneCodeExpired, FloodWait, MessageNotModified,
 )
 
-from common import clock
+from common import clock, fmt_duration
 from manager import Manager
 from redis_client import RedisClient
 from storage import Storage
@@ -219,6 +219,70 @@ class ControlBot:
             [_btn("⚙️ Автоматизация", f"autom:{main['id']}"), _btn(f"📱 Аккаунты ({len(accs)})", "list")],
             [_btn("📊 Статистика", f"dashstats:{main['id']}"), _btn("🔄 Обновить", "home")],
         ])
+
+    # ============ 📊 Статистика за период ============
+    # История копится отдельным фоновым циклом (main.py:stats_snapshot_loop) в виде
+    # периодических снимков account["stats"] в Redis — "за период" = текущая сумма
+    # минус ближайший снимок ДО начала периода. Без Redis (или пока история не
+    # накопилась на весь запрошенный период) — честно показываем, что доступно.
+    _STATS_PERIODS = [
+        ("1h", "Час", 3600), ("7h", "7 часов", 7 * 3600),
+        ("1d", "День", 86400), ("1w", "Неделя", 7 * 86400),
+        ("1mo", "Месяц", 30 * 86400), ("all", "Всё время", None),
+    ]
+
+    async def _stats_period_values(self, acc: dict, period_seconds: int | None) -> tuple[dict, str]:
+        current = acc.get("stats", {})
+        if period_seconds is None:
+            return current, ""
+        if not self.redis_client or not self.redis_client.enabled:
+            return current, " <i>(без Redis история не копится — показано «Всё время»)</i>"
+        now = time.time()
+        snap = await self.redis_client.stats_snapshot_before(acc["id"], now - period_seconds)
+        if snap is None:
+            earliest = await self.redis_client.earliest_stats_snapshot(acc["id"])
+            if earliest is None:
+                return current, " <i>(история ещё не накопилась — показано «Всё время»)</i>"
+            snap_ts, snap = earliest
+            covered = fmt_duration(int(now - snap_ts))
+            return (
+                {k: max(0, int(current.get(k, 0)) - int(snap.get(k, 0))) for k in current},
+                f" <i>(истории меньше периода — показано за {covered}, с начала учёта)</i>",
+            )
+        delta = {k: max(0, int(current.get(k, 0)) - int(snap.get(k, 0))) for k in current}
+        return delta, ""
+
+    async def _stats_text(self, acc: dict, period_key: str) -> str:
+        seconds = next((s for k, _, s in self._STATS_PERIODS if k == period_key), None)
+        label = next((lbl for k, lbl, _ in self._STATS_PERIODS if k == period_key), "Всё время")
+        values, note = await self._stats_period_values(acc, seconds)
+        crown = "👑 " if acc.get("is_main") else ""
+        return (
+            "📊 <b>СТАТИСТИКА</b>\n"
+            f"Профиль: {crown}{html.escape(str(acc.get('name', '')))}\n"
+            f"Период: <b>{label}</b>{note}\n"
+            "───\n"
+            f"📱 Телефоны: <code>{values.get('phones', 0)}</code> "
+            f"(⭐<code>{values.get('good_phones', 0)}</code>)\n"
+            f"🎰 Рулетка: <code>{values.get('roulette', 0)}</code>\n"
+            f"⛏ Майнинг: <code>{values.get('mining', 0)}</code>\n"
+            f"🎁 Daily: <code>{values.get('daily', 0)}</code>\n"
+            f"💸 Выведено: <code>{values.get('paid', 0)}</code>\n"
+            f"🔄 Обмен: <code>{values.get('exchanged', 0)}</code>\n"
+            f"📦 Контейнеры: <code>{values.get('containers_bought', 0)}</code>"
+        )
+
+    def _stats_menu(self, acc: dict, period_key: str) -> InlineKeyboardMarkup:
+        aid = acc["id"]
+        rows = []
+        for i in range(0, len(self._STATS_PERIODS), 2):
+            row = []
+            for key, label, _ in self._STATS_PERIODS[i:i + 2]:
+                mark = "✅ " if key == period_key else ""
+                row.append(_btn(f"{mark}{label}", f"statsperiod:{aid}:{key}"))
+            rows.append(row)
+        rows.append([_btn("⬅️ Назад", "home")])
+        return InlineKeyboardMarkup(rows)
 
     async def _open_dashboard(self, uid: int, chat_id: int) -> None:
         """Первый показ дэшборда — новым сообщением (приветственный экран NEXUSCARDS —
@@ -550,30 +614,62 @@ class ControlBot:
             [_btn("⬅️ Назад", f"autphn:{aid}")],
         ])
 
+    def _intervals_text(self, acc: dict) -> str:
+        crown = "👑 " if acc.get("is_main") else ""
+
+        def line(emoji: str, label: str, seconds) -> str:
+            s = int(seconds)
+            return f"• {emoji} {label}: <code>{fmt_duration(s)}</code> ({s}с)"
+
+        body = "\n".join([
+            line("🎴", "Карточки", acc.get("card_interval", 3600)),
+            line("🎰", "Рулетка", acc.get("roulette_interval", 3600)),
+            line("⛏️", "Майнинг", acc.get("mining_check_interval", 14400)),
+            f"• 🎁 Ежедневная: <code>{acc.get('mining_time', '01:00')} МСК</code>",
+            line("💸", "Авто-вывод", acc.get("autopay_interval", 14400)),
+            line("🤝", "Авто-трейд", acc.get("autotrade_interval", 14400)),
+        ])
+        return (
+            "⏱️ <b>НАСТРОЙКА ИНТЕРВАЛОВ</b>\n"
+            f"Профиль: {crown}{html.escape(str(acc.get('name', '')))}\n\n"
+            f"<blockquote>Текущие задержки автосбора:\n{body}</blockquote>\n\n"
+            "Нажмите на кнопку ниже, чтобы изменить интервал:"
+        )
+
     def _intervals_menu(self, acc: dict) -> InlineKeyboardMarkup:
         aid = acc["id"]
+        ci = fmt_duration(int(acc.get("card_interval", 3600)))
+        ri = fmt_duration(int(acc.get("roulette_interval", 3600)))
+        mi = fmt_duration(int(acc.get("mining_check_interval", 14400)))
+        mt = acc.get("mining_time", "01:00")
+        pi = fmt_duration(int(acc.get("autopay_interval", 14400)))
+        ti = fmt_duration(int(acc.get("autotrade_interval", 14400)))
         return InlineKeyboardMarkup([
-            [_btn(f"⏱ Карточки: {acc.get('card_interval', 3600)}с", f"setcard:{aid}")],
-            [_btn(f"⏱ Рулетка: {acc.get('roulette_interval', 3600)}с", f"setroul:{aid}")],
-            [_btn(f"⛏ Майнинг — раз в: {acc.get('mining_check_interval', 14400)}с", f"setmininterval:{aid}")],
-            [_btn(f"🎁 Ежедневная награда (МСК): {acc.get('mining_time', '01:00')}", f"setmtime:{aid}")],
-            [_btn(f"💸 Авто-вывод — раз в: {acc.get('autopay_interval', 14400)}с", f"setpayinterval:{aid}")],
-            [_btn(f"🤝 Авто-трейд — раз в: {acc.get('autotrade_interval', 14400)}с", f"settradeinterval:{aid}")],
-            [_btn("⬅️ Назад", f"farm:{aid}")],
+            [_btn(f"🎴 Карточки: {ci}", f"setcard:{aid}"), _btn(f"🎰 Рулетка: {ri}", f"setroul:{aid}")],
+            [_btn(f"⛏️ Майнинг: {mi}", f"setmininterval:{aid}"), _btn(f"🎁 Награда: {mt}", f"setmtime:{aid}")],
+            [_btn(f"💸 Вывод: {pi}", f"setpayinterval:{aid}"), _btn(f"🤝 Трейд: {ti}", f"settradeinterval:{aid}")],
+            [_btn("⬅️ Назад в меню", f"farm:{aid}")],
         ])
 
+    def _actions_text(self, acc: dict) -> str:
+        crown = "👑 " if acc.get("is_main") else ""
+        return (
+            "⚡️ <b>РУЧНОЙ ЗАПУСК ДЕЙСТВИЙ</b>\n"
+            f"Профиль: {crown}{html.escape(str(acc.get('name', '')))}\n\n"
+            "<blockquote>Выберите модуль для немедленного выполнения команды "
+            "в обход таймеров.</blockquote>"
+        )
+
     def _actions_menu(self, acc: dict) -> InlineKeyboardMarkup:
-        """Верхний уровень «▶️ Действия» — только навигация по группам (был одним
-        длинным плоским списком вперемешку — разложено по смыслу так же, как
-        «⚙️ Автоматизация», см. _automation_menu)."""
+        """Верхний уровень «▶️ Действия» — навигация по группам, 2 колонки.
+        ▶️ — открывает подменю группы, ⚡️ — сразу выполняет (см. actall:)."""
         aid = acc["id"]
         return InlineKeyboardMarkup([
-            [_btn("🎮 Игра", f"actgame:{aid}")],
-            [_btn("🔧 Ферма", f"actfarm:{aid}")],
-            [_btn("🛠 Мастерская", f"actrepair:{aid}")],
-            [_btn("🏪 Магазин", f"actshop:{aid}")],
-            [_btn("💰 Финансы", f"actfin:{aid}")],
-            [_btn("⬅️ Назад", f"farm:{aid}")],
+            [_btn("▶️ 🎮 Игра", f"actgame:{aid}"), _btn("▶️ 🔧 Ферма", f"actfarm:{aid}")],
+            [_btn("▶️ 🛠 Мастерская", f"actrepair:{aid}"), _btn("▶️ 🏪 Магазин", f"actshop:{aid}")],
+            [_btn("▶️ 💰 Финансы", f"actfin:{aid}")],
+            [_btn("⚡️ Запустить всё", f"actall:{aid}")],
+            [_btn("⬅️ Назад к аккаунту", f"farm:{aid}")],
         ])
 
     def _act_game_menu(self, acc: dict) -> InlineKeyboardMarkup:
@@ -810,9 +906,12 @@ class ControlBot:
             if data.startswith("acc:"):
                 await self._show(q, acc)
             elif data.startswith("dashstats:"):
-                w = self.manager.workers.get(aid)
-                stats = w.stats_line() if w else "аккаунт не запущен"
-                return await q.answer(stats, show_alert=True)
+                await q.message.edit_text(await self._stats_text(acc, "all"),
+                                          reply_markup=self._stats_menu(acc, "all"))
+            elif data.startswith("statsperiod:"):
+                period_key = data.split(":")[2]
+                await q.message.edit_text(await self._stats_text(acc, period_key),
+                                          reply_markup=self._stats_menu(acc, period_key))
             elif data.startswith("farm:"):
                 await q.message.edit_text(self._farm_text(acc), reply_markup=self._farm_menu(acc))
             elif data.startswith("autosend:"):
@@ -843,11 +942,11 @@ class ControlBot:
                 await q.message.edit_text(f"🏪 Настройки автозакупки телефонов — <b>{acc.get('name')}</b>\n───",
                                           reply_markup=self._phone_shop_settings_menu(acc))
             elif data.startswith("intervals:"):
-                await q.message.edit_text(f"⏱ Интервалы — <b>{acc.get('name')}</b>\n───",
-                                          reply_markup=self._intervals_menu(acc))
+                await q.message.edit_text(self._intervals_text(acc), reply_markup=self._intervals_menu(acc))
             elif data.startswith("actions:"):
-                await q.message.edit_text(f"▶️ Действия — <b>{acc.get('name')}</b>\n───",
-                                          reply_markup=self._actions_menu(acc))
+                await q.message.edit_text(self._actions_text(acc), reply_markup=self._actions_menu(acc))
+            elif data.startswith("actall:"):
+                await self._start_run_all(q, aid)
             elif data.startswith("actgame:"):
                 await q.message.edit_text(f"🎮 Игра — <b>{acc.get('name')}</b>\n───",
                                           reply_markup=self._act_game_menu(acc))
@@ -1367,6 +1466,51 @@ class ControlBot:
         acc = self.storage.get(aid)
         await self._safe_edit(q, f"🛠 Мастерская — <b>{acc.get('name')}</b>\n───\n🔩 {result}",
                               self._act_repair_menu(acc))
+
+    async def _start_run_all(self, q: CallbackQuery, aid: int) -> None:
+        w = self.manager.workers.get(aid)
+        if not w or not w.running:
+            return await q.answer("Аккаунт не запущен", show_alert=True)
+        await q.answer("⚡️ Запускаю полный цикл...")
+        asyncio.create_task(self._run_all_now(q, aid, w))
+
+    async def _run_all_now(self, q: CallbackQuery, aid: int, w) -> None:
+        """«Запустить всё» — прогоняет по очереди все безопасные (без ручного ввода
+        получателя/суммы) команды «...сейчас» из всех разделов. Намеренно НЕ трогает
+        Финансы (перевод человеку/трейд/слив телефонов — нужен получатель; вывод всего/
+        слив твинкам — реально перемещают деньги) — это одноразовые действия с явным
+        подтверждением, а не часть автоматического цикла фарма."""
+        acc = self.storage.get(aid)
+        results: list[str] = []
+
+        async def step(label: str, coro) -> None:
+            try:
+                res = await coro
+            except Exception as e:  # noqa: BLE001
+                res = f"ошибка: {e}"
+            results.append(f"{label}: {res}")
+
+        await w.collect_mining()
+        results.append(f"⛏ Майнинг: {w.last_mining}")
+        await step("🔧 Обслуживание фермы", w.farm_maintenance_now())
+        await step("🧩 Заполнить ферму", w.fill_farm_now())
+        await step("⚡ Перегрузка питания", w.relieve_overload_now())
+        if acc.get("pcoin_exchange_enabled", False):
+            await step("💱 P-Coins → ТОчки", w.dump_pcoins_now())
+        if acc.get("pcoin_send_enabled", False):
+            await step("💱 P-Coins получателю", w.send_pcoins_now())
+        await step("🛠 Нерабочие телефоны", w.repair_now())
+        await step("🔩 Оборудование", w.repair_equipment_now())
+        await step("🏪 Магазин телефонов", w.buy_phones_now())
+        if acc.get("containers_api_enabled", False):
+            await step("📦⚡ Контейнеры", w.buy_containers_api_now())
+
+        acc = self.storage.get(aid)  # могло измениться (напр. name) за время выполнения
+        summary = "\n".join(f"• {r}" for r in results)
+        await self._safe_edit(
+            q, f"⚡️ <b>Запустить всё</b> — {acc.get('name')}\n───\n{summary}",
+            self._actions_menu(acc),
+        )
 
     async def _start_farm_maintenance_now(self, q: CallbackQuery, aid: int) -> None:
         w = self.manager.workers.get(aid)
