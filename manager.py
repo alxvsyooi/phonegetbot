@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from contextlib import AsyncExitStack
 
 from pyrogram.errors import FloodWait
@@ -126,6 +127,62 @@ class Manager:
     async def stop_all(self) -> None:
         for acc_id in list(self.workers):
             await self.stop_account(acc_id)
+
+    # ---------- вотчдог: перезапуск воркеров, чьи циклы упали незаметно ----------
+    async def watchdog_loop(self, check_interval: int = 60, max_restarts_per_hour: int = 3) -> None:
+        """Каждый фоновый цикл (farm.py/shop.py/repair.py/containers_api.py/autosend.py)
+        сам ловит Exception и продолжает работать через backoff — таск может завершиться
+        незапланированно, только если что-то вылетело МИМО этих except (реальный баг) или
+        клиент отвалился так, что ни один цикл этого не заметил. worker.running=False,
+        выставленный самим _handle_dead_session (сессия мертва, нужен перелогин) — это
+        осознанная остановка, не падение, вотчдог её не трогает и не перезапускает
+        (перезапуск с тем же session_string ничего не исправит).
+
+        Если worker.running всё ещё True, а часть его тасков уже .done() — значит цикл
+        упал незаметно для всех остальных: аккаунт продолжает числиться «работает», но
+        часть автоматизации молча стоит. Перезапускаем аккаунт (stop_account+start_account
+        пересоздаёт клиента и все таски с нуля). Ограничение по частоте — чтобы аккаунт,
+        падающий сразу после старта (сломанная сессия, специфичная для него), не долбился
+        в бесконечном рестарт-цикле — после max_restarts_per_hour просто алертим владельца
+        и перестаём трогать аккаунт до ручной проверки."""
+        restart_log: dict[int, list[float]] = {}
+        while True:
+            await asyncio.sleep(check_interval)
+            for acc_id, worker in list(self.workers.items()):
+                if not worker.running:
+                    continue
+                dead = [t for t in worker._tasks if t.done()]
+                if not dead:
+                    continue
+                for t in dead:
+                    exc = None
+                    if not t.cancelled():
+                        try:
+                            exc = t.exception()
+                        except asyncio.CancelledError:
+                            pass
+                    print(f"[watchdog] «{worker.name}» (id={acc_id}): фоновый цикл упал "
+                          f"незаметно{f': {exc!r}' if exc else ''}")
+
+                now = time.time()
+                hist = [ts for ts in restart_log.get(acc_id, []) if now - ts < 3600]
+                if len(hist) >= max_restarts_per_hour:
+                    print(f"[watchdog] «{worker.name}»: уже {len(hist)} рестартов за час — "
+                          f"автоперезапуск остановлен, нужна ручная проверка")
+                    owner_id = worker.account.get("owner_id")
+                    if owner_id:
+                        await self.send_alert(
+                            owner_id,
+                            f"⚠️ <b>Watchdog</b>: «{worker.name}» падает повторно "
+                            f"({len(hist)}+ раз за последний час) — автоперезапуск "
+                            f"остановлен, посмотри вручную (возможно, сломана сессия).",
+                        )
+                    continue
+                restart_log[acc_id] = hist + [now]
+
+                print(f"[watchdog] «{worker.name}»: перезапускаю аккаунт")
+                await self.stop_account(acc_id)
+                await self.start_account(acc_id)
 
     # ---------- получатели ----------
     def copy_targets(self, owner_id: int, src_id: int) -> int:

@@ -25,8 +25,15 @@ initData — подпись Telegram WebApp (auth_date/hash/user), обычна�
 messages.requestSimpleWebView (используя УЖЕ подключённый self.client этого
 аккаунта, а не отдельный сторонний скрипт — так безопаснее для боевой
 сессии, см. обсуждение AUTH_KEY_UNREGISTERED при попытке отдельного теста).
-initData имеет ограниченный срок жизни (auth_date) — получаем её заново
-перед каждой попыткой купить, не кэшируем надолго.
+initData имеет ограниченный срок жизни (auth_date), поэтому получать её
+заново на КАЖДУЮ попытку купить казалось безопасным умолчанием — но в
+burst-окне ресто (см. _containers_api_loop) это означает до ~60 полных
+MTProto-хендшейков за один всплеск с интервалом в 1.5с: лишняя нагрузка,
+лишняя задержка и риск словить FloodWait именно тогда, когда важна
+скорость. Поэтому initData кэшируется на короткий TTL (см. _get_init_data,
+сильно меньше реального срока жизни auth_date) и переиспользуется внутри
+одного всплеска; если сервер вдруг перестал принимать закэшированную
+initData — _fetch_state сама форсирует пересбор и повторяет попытку.
 """
 from __future__ import annotations
 
@@ -40,6 +47,7 @@ from pyrogram import raw
 
 from storage import CARDS_BOT
 from common import clock, today_msk
+from common import backoff_seconds as _backoff_seconds
 
 _DEFAULT_PRIORITY = ["donate", "expensive", "budget"]
 
@@ -120,13 +128,27 @@ class ContainersApiModule:
         except Exception:
             return None
 
-    # ---------- получить свежую initData + состояние магазина одним заходом ----------
-    async def _fetch_state(self, cfg: dict) -> tuple[str | None, dict | None]:
+    # ---------- initData с коротким кэшем (см. пояснение в шапке файла) ----------
+    async def _get_init_data(self, cfg: dict, *, force_refresh: bool = False) -> str | None:
+        ttl = max(1.0, float(cfg.get("init_data_ttl", 20)))
+        cached = self._containers_init_cache
+        if not force_refresh and cached and (time.time() - cached[1]) < ttl:
+            return cached[0]
         init_data = await self._fetch_webapp_init_data(cfg)
+        self._containers_init_cache = (init_data, time.time()) if init_data else None
+        return init_data
+
+    # ---------- получить (возможно закэшированную) initData + состояние магазина ----------
+    async def _fetch_state(self, cfg: dict, *, force_refresh: bool = False) -> tuple[str | None, dict | None]:
+        init_data = await self._get_init_data(cfg, force_refresh=force_refresh)
         if not init_data:
             return None, None
         state = await self._containers_api_post(cfg, "state", {"initData": init_data})
         if not state or not state.get("success"):
+            if not force_refresh:
+                # закэшированная initData могла протухнуть раньше TTL — один раз
+                # форсируем полный хендшейк заново, прежде чем сдаться
+                return await self._fetch_state(cfg, force_refresh=True)
             return init_data, None
         return init_data, state
 
@@ -161,6 +183,10 @@ class ContainersApiModule:
             if res and res.get("success"):
                 bought_parts.append(f"{c_type} x{qty}")
                 self._bump("containers_bought", qty)
+                # "donate" тут, "donation" в farm.py — тот же счётчик, что и у
+                # клик-пути (см. _buy_category), просто разное имя категории в API
+                cat_key = "donation" if c_type == "donate" else c_type
+                self._bump(f"containers_bought_{cat_key}", qty)
                 limits["inv_current"] = int(limits.get("inv_current", 0)) + qty
                 if is_donate:
                     limits["donate_bought"] = int(limits.get("donate_bought", 0)) + qty
@@ -258,5 +284,7 @@ class ContainersApiModule:
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
+                if await self._handle_dead_session(e):
+                    return
                 self.last_containers_api = f"ошибка: {e}"
-                await asyncio.sleep(60)
+                await asyncio.sleep(_backoff_seconds(e, default=60))

@@ -28,24 +28,15 @@ from datetime import datetime
 
 from storage import CARDS_BOT
 from common import clock, today_msk, MSK, parse_hhmm, seconds_until_msk
+from common import msg_text as _msg_text
+from common import backoff_seconds as _backoff_seconds
+from common import all_buttons as _all_buttons
+from common import find_button as _find_button
+from ui_engine import Design
 
 _PRICE_RE = re.compile(r"цена покупки\s*:?\s*([\d\s.,]+)", re.IGNORECASE)
 _MODEL_BUTTON_RE = re.compile(r"^(.*?)\s*\(([\d\s.,]+)\s*точек\)\s*$", re.IGNORECASE)
 _BUY_CONFIRM_RE = re.compile(r"вы купили\s*(\d+)", re.IGNORECASE)
-
-
-def _all_buttons(message) -> list[str]:
-    if message is None or not getattr(message, "reply_markup", None):
-        return []
-    return [getattr(b, "text", "") or "" for row in message.reply_markup.inline_keyboard for b in row]
-
-
-def _find_button(message, substr: str) -> str | None:
-    sub = substr.lower().strip()
-    for t in _all_buttons(message):
-        if sub in t.lower():
-            return t
-    return None
 
 
 def _max_numeric_button(message) -> str | None:
@@ -95,38 +86,48 @@ class ShopModule:
                     continue
                 hour, minute = parse_hhmm(self.account.get("mining_time"))
                 self.shop_next_ts = time.time() + seconds_until_msk(hour, minute)
+                await self._publish_status(shop_next_ts=self.shop_next_ts, last_shop=self.last_shop)
 
                 now = datetime.now(MSK)
                 due = now.hour == hour and now.minute == minute and last_fired != now.date()
                 if due and self._shop_active():
                     last_fired = now.date()
-                    await self.buy_phones_now()
+                    result = await self.buy_phones_now()
+                    # В отличие от farm.py, магазин телефонов раньше вообще никогда
+                    # не звал alert_fn — капча/непонятный ответ тут просто оседали
+                    # в last_shop незамеченными до следующего ручного захода в бота.
+                    # Не различаем причину (капча/бот перегружен/etc.) — просто любой
+                    # неуспех автопокупки (⚠️-статус) стоит один раз показать владельцу
+                    if result.startswith("⚠️"):
+                        await self._send_owner_alert(
+                            Design.alert_frame("⚠️", "МАГАЗИН ТЕЛЕФОНОВ", self.name,
+                                               f"<b>Автозакупка не прошла:</b> {result}"),
+                            error_label="алерт о магазине телефонов",
+                        )
                 await asyncio.sleep(20)
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
+                if await self._handle_dead_session(e):
+                    return
                 self.last_shop = f"ошибка: {e}"
-                await asyncio.sleep(20)
+                await self._publish_status(last_shop=self.last_shop)
+                await asyncio.sleep(_backoff_seconds(e, default=20))
 
-    # ---------- клик с повтором, если бот просто не спешит с ответом ----------
-    async def _click_retry(self, message, button_text: str, bot: str, cfg: dict, timeout: int = 15):
-        """Как _click_and_wait, но повторяет клик (не долбит наугад — тот же клик по
-        той же кнопке), если бот принял клик, но не ответил за timeout. Возвращает
-        (clicked, result); result is None, если так и не дождались ответа."""
-        retry_delay = max(2, int(cfg.get("retry_interval", 5)))
-        attempts = max(1, int(cfg.get("retry_attempts", 3)))
-        clicked = False
-        for i in range(attempts):
-            clicked, result = await self._click_and_wait(message, button_text, bot, timeout=timeout)
-            if not clicked:
-                return False, None
-            if result is not None:
-                return True, result
-            if i < attempts - 1:
-                await asyncio.sleep(retry_delay)
-        return clicked, None
+    # _click_retry — теперь общий метод в automation.py._WorkerBase (было
+    # продублировано дословно здесь и в repair.py)
 
     async def buy_phones_now(self) -> str:
+        """Обёртка под _shop_config_lock — farm.py.fill_farm_now() тоже держит этот
+        лок, пока временно подменяет phone_shop_model/quantity/rarity для докупки
+        модели фермы; без общей блокировки ежедневный авто-цикл (или ручная кнопка)
+        мог сработать в это окно и купить телефоны фермы вместо настроенной
+        автозакупки. fill_farm_now зовёт _buy_phones_now_impl() напрямую — он уже
+        держит этот же лок сам, повторный async with здесь дал бы deadlock."""
+        async with self._shop_config_lock:
+            return await self._buy_phones_now_impl()
+
+    async def _buy_phones_now_impl(self) -> str:
         """Открыть магазин телефонов, выбрать настроенную редкость/модель и купить.
         Используется циклом и кнопкой «🏪 Купить телефоны сейчас»."""
         if not self.client or not self.running:
@@ -208,7 +209,7 @@ class ShopModule:
         buy_btn = cfg.get("bulk_button", "купить оптом")
         confirm_btn = cfg.get("confirm_button", "подтвердить")
 
-        dtext = getattr(detail, "text", None) or getattr(detail, "caption", None) or ""
+        dtext = _msg_text(detail)
         price_m = _PRICE_RE.search(dtext)
         digits = re.sub(r"\D", "", price_m.group(1)) if price_m else ""
         unit_price = int(digits) if digits else None
@@ -222,13 +223,31 @@ class ShopModule:
             return f"⚠️ «{model_name}»: нет ответа на «{buy_btn}» ({clock()})"
 
         target = want_qty if want_qty > 0 else None
+        price_unknown = False
         if unit_price and balance is not None:
             affordable = balance // unit_price
             if affordable <= 0:
                 return f"⚠️ «{model_name}»: не хватает очков (цена {unit_price}, баланс {balance})"
             target = min(target, affordable) if target else affordable
+        elif target is None:
+            # Не разобрали цену (формат ответа игры мог чуть измениться) И
+            # phone_shop_quantity=0 ("без ограничений") — раньше в этом случае
+            # шли прямо на _max_numeric_button ниже и брали МАКСИМАЛЬНОЕ
+            # предложенное количество без всякой проверки баланса. Раз цену не
+            # знаем — безопаснее взять 1 шт., чем купить неизвестно сколько
+            # неизвестно за сколько.
+            target = 1
+            price_unknown = True
 
-        qty_btn = _numeric_button(qty_msg, target) or _max_numeric_button(qty_msg)
+        if price_unknown:
+            # НЕ падаем на _max_numeric_button здесь — если точной кнопки "1" нет,
+            # это значит "безопасное количество недоступно", а не "бери максимум"
+            qty_btn = _numeric_button(qty_msg, target)
+            if not qty_btn:
+                return (f"⚠️ «{model_name}»: не разобрал цену покупки, кнопки «1 шт.» тоже нет — "
+                        f"пропускаю на всякий случай, проверь вручную ({clock()})")
+        else:
+            qty_btn = _numeric_button(qty_msg, target) or _max_numeric_button(qty_msg)
         if not qty_btn:
             have = ", ".join(_all_buttons(qty_msg)) or "нет кнопок"
             return f"⚠️ «{model_name}»: не нашёл кнопку количества (есть: {have}) ({clock()})"
@@ -242,7 +261,7 @@ class ShopModule:
         if not clicked_confirm and _find_button(done, confirm_btn):
             return f"⚠️ «{model_name}»: не подтвердилась покупка ({clock()})"
 
-        text = (getattr(done, "text", None) or getattr(done, "caption", None) or "") if done else ""
+        text = _msg_text(done)
         m = _BUY_CONFIRM_RE.search(text)
         bought = int(m.group(1)) if m else None
         if bought:

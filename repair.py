@@ -39,6 +39,11 @@ from typing import Any
 
 from storage import CARDS_BOT
 from common import clock, today_msk, in_time_window, TBILISI
+from common import msg_text as _msg_text
+from common import backoff_seconds as _backoff_seconds
+from common import all_buttons as _all_buttons
+from common import find_button as _find_button
+from ui_engine import Design
 
 _CAPACITY_RE = re.compile(r"занято ремонтом\D*?(\d+)\s*/\s*(\d+)", re.IGNORECASE)
 _MODEL_RE = re.compile(r"модель\s*:?\s*(.+)", re.IGNORECASE)
@@ -54,42 +59,12 @@ _MODEL_COUNT_RE = re.compile(r"\(\s*x?\s*(\d+)\s*\)\s*$", re.IGNORECASE)
 _WORKSHOP_OWNER_RE = re.compile(r"(\d+)\.[\s\S]*?владелец\s*:?\s*@(\S+)", re.IGNORECASE)
 
 
-def _all_buttons(message) -> list[str]:
-    if message is None or not getattr(message, "reply_markup", None):
-        return []
-    return [getattr(b, "text", "") or "" for row in message.reply_markup.inline_keyboard for b in row]
-
-
-def _find_button(message, substr: str) -> str | None:
-    sub = substr.lower()
-    for t in _all_buttons(message):
-        if sub in t.lower():
-            return t
-    return None
-
-
 def _first_nonempty_category(message) -> str | None:
     for t in _all_buttons(message):
         m = _COUNT_RE.search(t.strip())
         if m and int(m.group(1)) > 0:
             return t
     return None
-
-
-def _pick_least_busy_tool(message) -> str | None:
-    """Среди кнопок конкретных инструментов (не «назад»/«вернуться») выбирает
-    ту, что упомянута в тексте с наименьшим числом «активных запросов» — так
-    заявка не встаёт в очередь к уже занятому инструменту, если рядом есть
-    свободный. Не удалось распарсить загрузку — просто первая доступная кнопка."""
-    text = _msg_text(message)
-    loads = {name.strip().lower(): int(cnt) for name, cnt in _TOOL_LOAD_RE.findall(text)}
-    skip = ("назад", "вернуться")
-    candidates = [t for t in _all_buttons(message) if t.strip() and not any(s in t.lower() for s in skip)]
-    if not candidates:
-        return None
-    if loads:
-        candidates.sort(key=lambda t: loads.get(t.strip().lower(), 0))
-    return candidates[0]
 
 
 def _nonempty_categories(message) -> list[str]:
@@ -139,12 +114,6 @@ def _first_model_button(message) -> str | None:
     return None
 
 
-def _msg_text(message) -> str:
-    if message is None:
-        return ""
-    return getattr(message, "text", None) or getattr(message, "caption", None) or ""
-
-
 class RepairModule:
     """Миксин с мастерской. Ожидает от связанного класса: self.account, self.client,
     self.running, self._trade_mode, self._send_and_wait, self._click_and_wait,
@@ -154,20 +123,8 @@ class RepairModule:
     def _loops(self):
         return super()._loops() + [self._auto_repair_loop()]
 
-    # ---------- клик с повтором, если бот просто не спешит с ответом ----------
-    async def _click_retry(self, message, button_text: str, bot: str, cfg: dict, timeout: int = 15):
-        retry_delay = max(2, int(cfg.get("retry_interval", 5)))
-        attempts = max(1, int(cfg.get("retry_attempts", 3)))
-        clicked = False
-        for i in range(attempts):
-            clicked, result = await self._click_and_wait(message, button_text, bot, timeout=timeout)
-            if not clicked:
-                return False, None
-            if result is not None:
-                return True, result
-            if i < attempts - 1:
-                await asyncio.sleep(retry_delay)
-        return clicked, None
+    # _click_retry — теперь общий метод в automation.py._WorkerBase (было
+    # продублировано дословно здесь и в shop.py)
 
     # ---------- проактивные сообщения (входящие заказы на ремонт, оценка мастерской) ----------
     def _is_proactive(self, message) -> bool:
@@ -187,7 +144,12 @@ class RepairModule:
         """Достижение «Критик» считает КОЛИЧЕСТВО отзывов в чужих мастерских (Критик
         I/II/III — 10/20/50 отзывов), а не разовый факт — проверено вживую. Ставим
         фиксированную оценку из настроек (по умолчанию 5⭐ без комментария): цель
-        тут прогресс достижения, а не честная оценка чужой мастерской."""
+        тут прогресс достижения, а не честная оценка чужой мастерской.
+
+        Пишет в last_review, НЕ в last_repair — это отдельный проактивный поток
+        (реакция на входящее сообщение игры), который может сработать конкурентно
+        с фоновым циклом ремонта (_auto_repair_loop); раньше оба писали в
+        last_repair и затирали статус друг друга."""
         if not self.account.get("auto_review_enabled", False):
             return
         cfg = self.repair_cfg
@@ -196,16 +158,16 @@ class RepairModule:
         comment = cfg.get("review_comment", "нет")
         star_btn = _find_button(message, stars)
         if not star_btn:
-            self.last_repair = f"⚠️ отзыв: не нашёл кнопку «{stars}⭐» ({clock()})"
+            self.last_review = f"⚠️ отзыв: не нашёл кнопку «{stars}⭐» ({clock()})"
             return
         clicked, ask = await self._click_and_wait(message, star_btn, bot, timeout=15)
         if not clicked:
-            self.last_repair = f"⚠️ отзыв: не удалось нажать «{stars}⭐» ({clock()})"
+            self.last_review = f"⚠️ отзыв: не удалось нажать «{stars}⭐» ({clock()})"
             return
         if ask is not None:
             await self._send_and_wait(bot, comment, timeout=15)
         self._bump("reviews_left")
-        self.last_repair = f"⭐ оставил отзыв ({stars}) в чужой мастерской ({clock()} {today_msk()})"
+        self.last_review = f"⭐ оставил отзыв ({stars}) в чужой мастерской ({clock()} {today_msk()})"
 
     async def _start_repair_at_tools(self, tools_msg, bot: str, cfg: dict) -> tuple[bool, Any]:
         """tools_msg — экран со списком инструментов мастерской (своей или
@@ -221,7 +183,7 @@ class RepairModule:
         direct_start = _find_button(tools_msg, cfg.get("start_repair_button", "начать ремонт"))
         if direct_start:
             return await self._click_retry(tools_msg, direct_start, bot, cfg)
-        tool_btn = _pick_least_busy_tool(tools_msg)
+        tool_btn, tools_msg = await self._pick_least_busy_tool_paged(tools_msg, bot, cfg)
         if not tool_btn:
             return False, None
         clicked, confirm_msg = await self._click_retry(tools_msg, tool_btn, bot, cfg)
@@ -231,6 +193,36 @@ class RepairModule:
         if not confirm_btn:
             return False, confirm_msg
         return await self._click_retry(confirm_msg, confirm_btn, bot, cfg)
+
+    async def _pick_least_busy_tool_paged(self, first_msg, bot: str, cfg: dict, max_pages: int = 10):
+        """Среди кнопок конкретных инструментов (не «назад»/«вернуться») выбирает
+        ту, что упомянута в тексте с наименьшим числом «активных запросов», листая
+        "➡" по нескольким страницам, а не только по первой — при многостраничном
+        списке балансировка нагрузки раньше видела только первую страницу и могла
+        отправить заявку к уже занятому инструменту, хотя на второй странице был
+        свободный. Останавливается досрочно, как только находит инструмент с
+        нулевой загрузкой — искать "ещё свободнее" незачем."""
+        next_btn_label = cfg.get("next_page_button", "➡")
+        skip = ("назад", "вернуться", next_btn_label.lower())
+        best_btn, best_load, best_msg = None, None, first_msg
+        msg = first_msg
+        for _ in range(max_pages):
+            loads = {name.strip().lower(): int(cnt) for name, cnt in _TOOL_LOAD_RE.findall(_msg_text(msg))}
+            candidates = [t for t in _all_buttons(msg) if t.strip() and not any(s in t.lower() for s in skip)]
+            for t in candidates:
+                load = loads.get(t.strip().lower(), 0)
+                if best_load is None or load < best_load:
+                    best_btn, best_load, best_msg = t, load, msg
+            if best_load == 0:
+                break
+            nxt = _find_button(msg, next_btn_label)
+            if not nxt:
+                break
+            clicked, nxt_msg = await self._click_retry(msg, nxt, bot, cfg)
+            if not clicked or nxt_msg is None:
+                break
+            msg = nxt_msg
+        return best_btn, best_msg
 
     async def _maybe_accept_order(self, message) -> None:
         cfg = self.repair_cfg
@@ -357,6 +349,23 @@ class RepairModule:
             clicked, models_msg = await self._click_retry(cats_msg, cat_label, bot, cfg)
             if not clicked or models_msg is None:
                 continue
+            # Категория с ЕДИНСТВЕННЫМ сломанным телефоном иногда сразу открывает
+            # карточку ремонта, пропуская список моделей (тот же случай, что и в
+            # обычном пути repair_now() — см. проверку _BREAKAGES_RE там). Раньше
+            # это НЕ проверялось здесь: _priority_model_button искал кнопки вида
+            # «Модель (xN)», которых на карточке ремонта нет, и приоритетная
+            # модель молча пропускалась, хотя была в одном клике
+            if _BREAKAGES_RE.search(_msg_text(models_msg)):
+                model_m = _MODEL_RE.search(_msg_text(models_msg))
+                model_name = model_m.group(1).strip().lower() if model_m else ""
+                if model_name in priority:
+                    return models_msg
+                back_btn = _find_button(models_msg, "назад") or _find_button(models_msg, "вернуться")
+                if back_btn:
+                    clicked, back_msg = await self._click_retry(models_msg, back_btn, bot, cfg)
+                    if clicked and back_msg is not None:
+                        cats_msg = back_msg
+                continue
             model_btn = _priority_model_button(models_msg, priority)
             if model_btn:
                 clicked, phone_card = await self._click_retry(models_msg, model_btn, bot, cfg)
@@ -383,14 +392,26 @@ class RepairModule:
                 if now < self.repair_next_ts:
                     await asyncio.sleep(min(60, self.repair_next_ts - now))
                     continue
-                await self.repair_now()
+                result = await self.repair_now()
+                # Как и в shop.py — раньше мастерская вообще не звала alert_fn,
+                # капча/непонятный ответ оседали в last_repair незамеченными
+                if result.startswith("⚠️"):
+                    await self._send_owner_alert(
+                        Design.alert_frame("⚠️", "МАСТЕРСКАЯ", self.name,
+                                           f"<b>Автопочинка не прошла:</b> {result}"),
+                        error_label="алерт о мастерской",
+                    )
                 interval = max(60, int(self.repair_cfg.get("check_interval", 300)))
                 self.repair_next_ts = time.time() + interval
+                await self._publish_status(repair_next_ts=self.repair_next_ts, last_repair=self.last_repair)
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
+                if await self._handle_dead_session(e):
+                    return
                 self.last_repair = f"ошибка: {e}"
-                self.repair_next_ts = time.time() + 300
+                self.repair_next_ts = time.time() + _backoff_seconds(e, default=300)
+                await self._publish_status(repair_next_ts=self.repair_next_ts, last_repair=self.last_repair)
                 await asyncio.sleep(5)
 
     async def repair_now(self) -> str:

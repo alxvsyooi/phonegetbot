@@ -25,6 +25,8 @@ from storage import (
     EXCHANGE_WORD,
 )
 from common import MSK, parse_hhmm, seconds_until_msk, fmt_duration, clock, today_msk
+from common import backoff_seconds as _backoff_seconds
+from common import msg_text as _common_msg_text
 from ui_engine import Design
 
 BUFFER_SEC = 5  # буфер к кулдауну, чтобы не упереться ровно в секунду
@@ -307,10 +309,7 @@ def _find_rarity_button(message, rarity_label: str) -> str | None:
     return None
 
 
-def _msg_text(message) -> str:
-    if message is None:
-        return ""
-    return getattr(message, "text", None) or getattr(message, "caption", None) or ""
+_msg_text = _common_msg_text  # см. common.py — общий хелпер, вынесен туда из этого файла
 
 
 def _exact_button(message, target: str) -> str | None:
@@ -467,8 +466,10 @@ class FarmModule:
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
+                if await self._handle_dead_session(e):
+                    return
                 self.last_card = f"ошибка: {e}"
-                self.card_next_ts = time.time() + 60
+                self.card_next_ts = time.time() + _backoff_seconds(e)
                 await self._publish_status(card_next_ts=self.card_next_ts, last_card=self.last_card)
                 await asyncio.sleep(5)
 
@@ -509,8 +510,10 @@ class FarmModule:
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
+                if await self._handle_dead_session(e):
+                    return
                 self.last_roulette = f"ошибка: {e}"
-                self.roulette_next_ts = time.time() + 60
+                self.roulette_next_ts = time.time() + _backoff_seconds(e)
                 await self._publish_status(roulette_next_ts=self.roulette_next_ts, last_roulette=self.last_roulette)
                 await asyncio.sleep(5)
 
@@ -540,8 +543,10 @@ class FarmModule:
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
+                if await self._handle_dead_session(e):
+                    return
                 self.last_mining = f"ошибка: {e}"
-                self.mining_next_ts = time.time() + 60
+                self.mining_next_ts = time.time() + _backoff_seconds(e)
                 await self._publish_status(mining_next_ts=self.mining_next_ts, last_mining=self.last_mining)
                 await asyncio.sleep(5)
 
@@ -572,8 +577,10 @@ class FarmModule:
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
+                if await self._handle_dead_session(e):
+                    return
                 self.last_daily = f"ошибка: {e}"
-                await asyncio.sleep(20)
+                await asyncio.sleep(_backoff_seconds(e, default=20))
 
     # ---------- авто-вывод очков (независимый цикл, свой интервал) ----------
     async def _autopay_loop(self) -> None:
@@ -595,8 +602,10 @@ class FarmModule:
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
+                if await self._handle_dead_session(e):
+                    return
                 self.last_payout = f"ошибка авто-вывода: {e}"
-                self.autopay_next_ts = time.time() + 60
+                self.autopay_next_ts = time.time() + _backoff_seconds(e)
                 await asyncio.sleep(5)
 
     # ---------- авто-трейд (независимый цикл, свой интервал) ----------
@@ -623,8 +632,10 @@ class FarmModule:
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
+                if await self._handle_dead_session(e):
+                    return
                 self.last_exchange = f"ошибка авто-трейда: {e}"
-                self.autotrade_next_ts = time.time() + 300
+                self.autotrade_next_ts = time.time() + _backoff_seconds(e, default=300)
                 await asyncio.sleep(5)
 
     # ---------- магазин контейнеров ----------
@@ -637,7 +648,12 @@ class FarmModule:
                 if self._trade_mode:
                     await asyncio.sleep(2)
                     continue
-                if not self._farm_active() or not self.account.get("containers_enabled", False):
+                # containers_api_enabled (HTTP API, containers_api.py) — быстрее по
+                # заявке самого модуля; если включены оба пути, они бы гонялись за
+                # одним и тем же лимитированным стоком на рестоке. Отдаём приоритет
+                # API-пути, клик-путь тогда просто простаивает, а не мешает
+                if (not self._farm_active() or not self.account.get("containers_enabled", False)
+                        or self.account.get("containers_api_enabled", False)):
                     await asyncio.sleep(20)
                     continue
                 now = time.time()
@@ -648,8 +664,10 @@ class FarmModule:
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
+                if await self._handle_dead_session(e):
+                    return
                 self.last_container = f"ошибка: {e}"
-                self.container_next_ts = time.time() + 60
+                self.container_next_ts = time.time() + _backoff_seconds(e)
                 await asyncio.sleep(5)
 
     # ---------- биржа P-Coins: продажа за ТОчки (dump_pcoins_now) ИЛИ перевод
@@ -677,8 +695,10 @@ class FarmModule:
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
+                if await self._handle_dead_session(e):
+                    return
                 self.last_pcoin_exchange = f"ошибка: {e}"
-                self.pcoin_exchange_next_ts = time.time() + 300
+                self.pcoin_exchange_next_ts = time.time() + _backoff_seconds(e, default=300)
                 await asyncio.sleep(5)
 
     def _classify_shop_reply(self, cfg: dict, reply, text: str | None) -> str:
@@ -948,13 +968,14 @@ class FarmModule:
         if not btn:
             return None
         retry_interval = max(3, int(cfg.get("retry_interval", 10)))
-        for i in range(3):
+        attempts = max(1, int(cfg.get("retry_attempts", 3)))
+        for i in range(attempts):
             clicked, result = await self._click_and_wait(msg, btn, bot, timeout=timeout)
             if not clicked:
                 return None
             if result is not None:
                 return result
-            if i < 2:
+            if i < attempts - 1:
                 await asyncio.sleep(retry_interval)
         return None
 
@@ -1055,9 +1076,9 @@ class FarmModule:
                 continue
 
             level_ups, spent, stop_reason = 0, 0, None
-            level = parse_upgrade_level(getattr(cur, "text", None) or getattr(cur, "caption", None) or "")
+            level = parse_upgrade_level(_msg_text(cur))
             while True:
-                dtext = getattr(cur, "text", None) or getattr(cur, "caption", None) or ""
+                dtext = _msg_text(cur)
                 if UPGRADE_MAX_MARKER in dtext.lower() or (level is not None and level >= UPGRADE_MAX_LEVEL):
                     break
                 buy_btn = _find_button(cur, UPGRADE_BUY_BUTTON)
@@ -1088,8 +1109,7 @@ class FarmModule:
                     break
                 # сверяем реальный уровень с экрана результата — если он не вырос,
                 # покупка на деле не прошла, несмотря на «успешный» клик
-                new_level = parse_upgrade_level(
-                    getattr(result_msg, "text", None) or getattr(result_msg, "caption", None) or "")
+                new_level = parse_upgrade_level(_msg_text(result_msg))
                 if new_level is not None and level is not None and new_level <= level:
                     stop_reason = f"уровень не изменился после покупки (был {level}), стоп"
                     break
@@ -1163,7 +1183,7 @@ class FarmModule:
         detail = await self._click_step(bot, shop_msg, category_label, cfg, timeout=15)
         if detail is None:
             return False, f"{category_label}: нет ответа на выбор категории", 0
-        dtext = getattr(detail, "text", None) or getattr(detail, "caption", None) or ""
+        dtext = _msg_text(detail)
         remaining = parse_remaining(dtext)
         if not remaining or remaining <= 0:
             return False, "", 0  # лимит категории исчерпан — не ошибка, просто нечего брать
@@ -1206,7 +1226,7 @@ class FarmModule:
         if step is None:
             return False, f"{category_label}: нет ответа после выбора количества", 0
 
-        step_text = getattr(step, "text", None) or getattr(step, "caption", None) or ""
+        step_text = _msg_text(step)
         total_price = parse_total_price(step_text) or (unit_price * remaining if unit_price else 0)
 
         # если это экран подтверждения — жмём; если покупка уже прошла сама — не мешаем
@@ -1215,6 +1235,8 @@ class FarmModule:
                 return False, f"{category_label}: не подтвердилась покупка", 0
 
         self._bump("containers_bought", remaining)
+        if key in _CATEGORY_QTY_FIELD:  # key = "donation"/"expensive"/"budget"
+            self._bump(f"containers_bought_{key}", remaining)
         return True, f"{remaining} шт. ({category_label}, ~{total_price:,} ТОчек)".replace(",", " "), total_price
 
     async def _buy_containers(self, bot: str, shop_msg, cfg: dict) -> str:
@@ -1248,36 +1270,34 @@ class FarmModule:
                     msg = refreshed
         return "; ".join(results)
 
-    async def _notify_price_mismatch(self, category_label: str, unit_price: int) -> None:
+    async def _send_owner_alert(self, text: str, markup=None, error_label: str = "алерт") -> None:
+        """Общая точка отправки: owner_id/alerts_enabled/alert_fn guard + try/except
+        с print-фоллбэком — вынесено из 4-х похожих _notify_* функций ниже. Текст/
+        markup каждая функция строит по-своему (у капчи своя многоветочная логика +
+        кнопки выбора категории — не унифицируем силой, только общий "хвост" отправки)."""
         owner_id = self.account.get("owner_id")
-        if not owner_id or not self.account.get("alerts_enabled", True):
+        if not owner_id or not self.account.get("alerts_enabled", True) or not self.alert_fn:
             return
+        try:
+            await self.alert_fn(owner_id, text, markup)
+        except Exception as e:  # noqa: BLE001
+            print(f"[{self.name}] не удалось отправить {error_label}: {e}")
+
+    async def _notify_price_mismatch(self, category_label: str, unit_price: int) -> None:
         text = Design.alert_frame(
             "⚠️", "МАГАЗИН КОНТЕЙНЕРОВ", self.name,
             (f"<b>Причина:</b> цена «{category_label}» выглядит подозрительно "
              f"({unit_price:,} ТОчек)").replace(",", " ") +
             "\n<i>Действие: категория пропущена на всякий случай — проверь вручную</i>",
         )
-        if self.alert_fn:
-            try:
-                await self.alert_fn(owner_id, text, None)
-            except Exception as e:  # noqa: BLE001
-                print(f"[{self.name}] не удалось отправить алерт о цене: {e}")
+        await self._send_owner_alert(text, error_label="алерт о цене")
 
     async def _notify_restock_soon(self, cd: int) -> None:
         """Разовый алерт «ресток скоро» — за restock_alert_before секунд до расчётного
         рестока (или сразу с фактическим остатком, если он уже меньше на момент проверки)."""
-        owner_id = self.account.get("owner_id")
-        if not owner_id or not self.account.get("alerts_enabled", True):
-            return
         text = Design.alert_frame("⏰", "РЕСТОК СКОРО", self.name,
                                   f"<b>Магазин контейнеров:</b> ресток через <code>{fmt_duration(cd)}</code>")
-        if not self.alert_fn:
-            return
-        try:
-            await self.alert_fn(owner_id, text, None)
-        except Exception as e:  # noqa: BLE001
-            print(f"[{self.name}] не удалось отправить алерт о рестоке: {e}")
+        await self._send_owner_alert(text, error_label="алерт о рестоке")
 
     def _captcha_markup(self, cfg: dict) -> InlineKeyboardMarkup:
         """Кнопки выбора категории прямо в алерте — жмёшь, когда сам решил капчу
@@ -1336,10 +1356,7 @@ class FarmModule:
         if not self.alert_fn:
             print(f"[{self.name}] alert_fn не подключен — алерт не отправлен: {text[:80]}")
             return
-        try:
-            await self.alert_fn(owner_id, text, markup)
-        except Exception as e:  # noqa: BLE001
-            print(f"[{self.name}] не удалось отправить алерт через управляющего бота: {e}")
+        await self._send_owner_alert(text, markup, error_label="алерт через управляющего бота")
 
     # ---------- действия ----------
     async def _ensure_farm_on(self, root, cfg: dict | None = None):
@@ -1551,17 +1568,11 @@ class FarmModule:
         """Биржа ответила чем-то неожиданным (не разобрали кошелёк/нет кнопки
         подтверждения) — как и с контейнерами, зовём владельца разобраться,
         вместо того чтобы кликать вслепую."""
-        owner_id = self.account.get("owner_id")
-        if not owner_id or not self.account.get("alerts_enabled", True) or not self.alert_fn:
-            return
         msg = Design.alert_frame(
             "⚠️", "ОБМЕН P-COINS", self.name,
             f"<b>Причина:</b> неожиданный ответ биржи, проверь вручную\n«{text[:500]}»",
         )
-        try:
-            await self.alert_fn(owner_id, msg, None)
-        except Exception as e:  # noqa: BLE001
-            print(f"[{self.name}] не удалось отправить алерт о бирже: {e}")
+        await self._send_owner_alert(msg, error_label="алерт о бирже")
 
     async def collect_daily_reward(self) -> bool:
         """«Ежедневная награда» -> «Забрать». True при успехе. Собирается вместе
@@ -1615,8 +1626,10 @@ class FarmModule:
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
+                if await self._handle_dead_session(e):
+                    return
                 self.last_farm_maintenance = f"ошибка: {e}"
-                self.farm_maintenance_next_ts = time.time() + 60
+                self.farm_maintenance_next_ts = time.time() + _backoff_seconds(e)
                 await asyncio.sleep(5)
 
     # ---------- watchdog аварийной перегрузки питания/охлаждения (случайные «События») ----------
@@ -1641,10 +1654,20 @@ class FarmModule:
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
+                if await self._handle_dead_session(e):
+                    return
                 self.last_power_watchdog = f"ошибка: {e}"
-                await asyncio.sleep(60)
+                await asyncio.sleep(_backoff_seconds(e, default=60))
 
     async def relieve_overload_now(self) -> str:
+        """Обёртка над _relieve_overload_now_impl под общим с farm_maintenance_now
+        локом (_farm_power_lock) — обе многошагово дёргают Выключить/Включить на
+        одной и той же ферме (и через цикл, и через ручную кнопку в меню), без лока
+        могли интерливиться и оставлять ферму в непредсказуемом состоянии питания."""
+        async with self._farm_power_lock:
+            return await self._relieve_overload_now_impl()
+
+    async def _relieve_overload_now_impl(self) -> str:
         """Если ферма сейчас в аварийной перегрузке питания/охлаждения — снимает
         рабочие телефоны по одному (перепроверяя нагрузку после каждого), пока
         не перестанет превышать лимит, затем включает ферму обратно. Используется
@@ -1672,7 +1695,16 @@ class FarmModule:
 
             slots = parse_farm_slots(text)
             slot_models = self.account.setdefault("farm_slot_models", {})
-            working_nums = sorted(n for n, i in slots.items() if i["status"] == "working")
+            # Раньше снимали строго по номеру слота, не глядя, что за телефон — рискуя
+            # снять именно настроенную "целевую" модель фермы (farm_fill_model) раньше
+            # случайных прочих. Экран фермы не показывает редкость (только модель), так
+            # что полной сортировки по тиру нет — но хотя бы модель из farm_fill_model
+            # защищена: снимается последней, если совсем не хватает других вариантов
+            fill_model = (self.account.get("farm_fill_model") or "").strip().lower()
+            working_nums = sorted(
+                (n for n, i in slots.items() if i["status"] == "working"),
+                key=lambda n: (slots[n].get("model", "").strip().lower() == fill_model, n),
+            )
             if not working_nums:
                 self.last_power_watchdog = f"⚠️ перегрузка, но нет рабочих телефонов, чтобы снять ({clock()})"
                 return self.last_power_watchdog
@@ -1785,6 +1817,12 @@ class FarmModule:
         return 0
 
     async def farm_maintenance_now(self) -> str:
+        """Обёртка над _farm_maintenance_now_impl под общим с relieve_overload_now
+        локом (_farm_power_lock) — см. комментарий там."""
+        async with self._farm_power_lock:
+            return await self._farm_maintenance_now_impl()
+
+    async def _farm_maintenance_now_impl(self) -> str:
         """Обслуживание фермы: для каждого слота со статусом СЛОМАН — «Слот N» ->
         «Извлечь сломанный» (телефон уходит в «Мои телефоны -> Нерабочие»),
         безусловно. Для пустых слотов — сначала (ДО выключения фермы!) решаем,
@@ -2050,20 +2088,28 @@ class FarmModule:
         bought_note = ""
         if shortfall > 0:
             rarity = (self.account.get("farm_fill_rarity") or "").strip()
-            old_model = self.account.get("phone_shop_model")
-            old_qty = self.account.get("phone_shop_quantity")
-            old_rarity = self.account.get("phone_shop_rarity")
-            self.account["phone_shop_model"] = fill_model
-            self.account["phone_shop_quantity"] = shortfall
-            if rarity:
-                self.account["phone_shop_rarity"] = rarity
-            try:
-                shop_result = await self.buy_phones_now()
-            finally:
-                self.account["phone_shop_model"] = old_model
-                self.account["phone_shop_quantity"] = old_qty
+            # _shop_config_lock: phone_shop_model/quantity/rarity подменяются временно
+            # и восстанавливаются в finally, но buy_phones_now() делает много await
+            # внутри — без общего лока с _auto_shop_loop (shop.py) ежедневный
+            # автотриггер закупки мог сработать ровно в это окно и купить телефоны
+            # ФЕРМЫ вместо настроенной автозакупки (реальные игровые деньги не туда)
+            async with self._shop_config_lock:
+                old_model = self.account.get("phone_shop_model")
+                old_qty = self.account.get("phone_shop_quantity")
+                old_rarity = self.account.get("phone_shop_rarity")
+                self.account["phone_shop_model"] = fill_model
+                self.account["phone_shop_quantity"] = shortfall
                 if rarity:
-                    self.account["phone_shop_rarity"] = old_rarity
+                    self.account["phone_shop_rarity"] = rarity
+                try:
+                    # НЕ buy_phones_now() — тот сам берёт _shop_config_lock, а мы уже
+                    # держим его строчкой выше (deadlock на нерентерабельном Lock)
+                    shop_result = await self._buy_phones_now_impl()
+                finally:
+                    self.account["phone_shop_model"] = old_model
+                    self.account["phone_shop_quantity"] = old_qty
+                    if rarity:
+                        self.account["phone_shop_rarity"] = old_rarity
             bought_note = f"докупка «{fill_model}» x{shortfall}: {shop_result}; "
 
         maint_result = await self.farm_maintenance_now()

@@ -402,7 +402,14 @@ def _empty_stats() -> dict[str, int]:
     return {"phones": 0, "good_phones": 0, "roulette": 0, "mining": 0, "paid": 0,
             "exchanged": 0, "daily": 0, "containers_bought": 0, "shop_bought": 0,
             "repaired": 0, "accepted_orders": 0, "farm_extracted": 0, "farm_reinstalled": 0,
-            "pcoin_sold": 0, "pcoin_sent": 0, "reviews_left": 0, "avito_listed": 0}
+            "pcoin_sold": 0, "pcoin_sent": 0, "reviews_left": 0, "avito_listed": 0,
+            # repaired_external уже бампился из repair.py, но не был объявлен тут —
+            # значит не показывался в "пустой" карточке статистики нового аккаунта
+            "repaired_external": 0,
+            # разбивка containers_bought по категориям (аналитика трат) —
+            # заполняется и клик-путём (farm.py), и HTTP API-путём (containers_api.py)
+            "containers_bought_donation": 0, "containers_bought_expensive": 0,
+            "containers_bought_budget": 0}
 
 
 def _read_json(path: str, default):

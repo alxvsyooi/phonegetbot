@@ -277,12 +277,12 @@ class ControlBot:
 
     # ---------- ⚙️ Настройки аккаунта (алерты/акк/имя/удаление) ----------
     def _settings_text(self, acc: dict) -> str:
-        return f"⚙️ <b>Настройки</b> — {acc.get('name')}"
+        return f"⚙️ <b>Настройки</b> — {acc.get('name')}\n───"
 
     def _settings_menu(self, acc: dict) -> InlineKeyboardMarkup:
         aid = acc["id"]
-        al = "вкл ✅" if acc.get("alerts_enabled", True) else "выкл ❌"
-        rows = [[_btn(f"🔔 Алерты: {al}", f"talerts:{aid}")]]
+        al = Design.status_badge_plain(acc.get("alerts_enabled", True))
+        rows = [[_btn(f"🔔 Алерты — {al}", f"talerts:{aid}")]]
         if acc.get("owner_id") in self.admin_ids:
             n = len(acc.get("msg_log", []))
             rows.append([_btn(f"📩 Акк ({n})" if n else "📩 Акк", f"msgacc:{aid}")])
@@ -294,7 +294,7 @@ class ControlBot:
 
     # ---------- 📩 Акк (только создатель) ----------
     def _msgacc_text(self, acc: dict) -> str:
-        ma = "вкл ✅" if acc.get("msg_alert_enabled", False) else "выкл ❌"
+        ma = Design.status_badge(acc.get("msg_alert_enabled", False))
         log = acc.get("msg_log", [])
         if not log:
             body = "Сообщений пока нет."
@@ -304,14 +304,14 @@ class ControlBot:
                 f"{html.escape(m.get('text', ''))}"
                 for m in reversed(log)
             )
-        return (f"📩 <b>Акк</b> — {acc.get('name')}\n"
+        return (f"📩 <b>Акк</b> — {acc.get('name')}\n───\n"
                 f"Улавливать новые сообщения: {ma}\n\n{body}")
 
     def _msgacc_menu(self, acc: dict) -> InlineKeyboardMarkup:
         aid = acc["id"]
-        ma = "вкл ✅" if acc.get("msg_alert_enabled", False) else "выкл ❌"
+        ma = Design.status_badge_plain(acc.get("msg_alert_enabled", False))
         return InlineKeyboardMarkup([
-            [_btn(f"🔔 Улавливать: {ma}", f"tmsgacc:{aid}")],
+            [_btn(f"🔔 Улавливать — {ma}", f"tmsgacc:{aid}")],
             [_btn("🔄 Обновить", f"msgacc:{aid}"), _btn("🗑 Очистить историю", f"clrmsgacc:{aid}")],
             [_btn("⬅️ Назад", f"settings:{aid}")],
         ])
@@ -329,8 +329,8 @@ class ControlBot:
         ])
 
     def _farm_text(self, acc: dict) -> str:
-        fe = "вкл ✅" if acc.get("farm_enabled", True) else "выкл ❌"
-        return f"📱 <b>Фарм карточек</b> — {acc.get('name')}\nМодуль: {fe}"
+        fe = Design.status_badge(acc.get("farm_enabled", True))
+        return f"📱 <b>Фарм карточек</b> — {acc.get('name')}\n───\nМодуль: {fe}"
 
     def _targets_menu(self, acc: dict) -> InlineKeyboardMarkup:
         aid = acc["id"]
@@ -347,23 +347,23 @@ class ControlBot:
     def _autosend_menu(self, acc: dict) -> InlineKeyboardMarkup:
         aid = acc["id"]
         ae = acc.get("autosend_enabled", True)
-        sc = "вкл ✅" if acc.get("self_commands_enabled", True) else "выкл ❌"
+        sc = Design.status_badge_plain(acc.get("self_commands_enabled", True))
         return InlineKeyboardMarkup([
             [_btn("⏸ Выключить автоотправку" if ae else "▶️ Включить автоотправку", f"tautosend:{aid}")],
             [_btn("🧩 Мои задачи", f"tasks:{aid}")],
-            [_btn(f"💬 Команды .trade/.pay в личках: {sc}", f"tselfcmd:{aid}")],
+            [_btn(f"💬 Команды .trade/.pay в личках — {sc}", f"tselfcmd:{aid}")],
             [_btn("⬅️ Назад", f"acc:{aid}")],
         ])
 
     def _autosend_text(self, acc: dict) -> str:
-        ae = "вкл ✅" if acc.get("autosend_enabled", True) else "выкл ❌"
+        ae = Design.status_badge(acc.get("autosend_enabled", True))
         n = len(acc.get("tasks", []))
-        return (f"📨 <b>Автоотправка</b> — {acc.get('name')}\nМодуль: {ae}\n"
-                f"Задач настроено: {n}")
+        return (f"📨 <b>Автоотправка</b> — {acc.get('name')}\n───\nМодуль: {ae}\n"
+                f"Задач настроено: <code>{n}</code>")
 
     @staticmethod
     def _s(acc: dict, f: str, d: bool = True) -> str:
-        return "вкл ✅" if acc.get(f, d) else "выкл ❌"
+        return Design.status_badge_plain(acc.get(f, d))
 
     @staticmethod
     def _category_on(acc: dict, fields: list[tuple[str, bool]]) -> bool:
@@ -409,9 +409,9 @@ class ControlBot:
             # 🃏 Карточки — теперь отдельный экран-модуль (см. _cards_module_menu),
             # остальные 3 строки этого меню не тронуты (не входят в пилот)
             [_btn(f"🎴 Карточки — {Design.status_badge_plain(acc.get('card_enabled', True))} →", f"cardmod:{aid}")],
-            [_btn(f"🎰 Рулетка: {self._s(acc, 'roulette_enabled')}", f"troul:{aid}")],
-            [_btn(f"⛏ Майнинг: {self._s(acc, 'mining_enabled')}", f"tmine:{aid}")],
-            [_btn(f"🎁 Ежедневная награда: {self._s(acc, 'daily_reward_enabled')}", f"tdaily:{aid}")],
+            [_btn(f"🎰 Рулетка — {self._s(acc, 'roulette_enabled')}", f"troul:{aid}")],
+            [_btn(f"⛏ Майнинг — {self._s(acc, 'mining_enabled')}", f"tmine:{aid}")],
+            [_btn(f"🎁 Ежедневная награда — {self._s(acc, 'daily_reward_enabled')}", f"tdaily:{aid}")],
             [_btn("⬅️ Назад", f"autom:{aid}")],
         ])
 
@@ -459,16 +459,16 @@ class ControlBot:
     def _autom_finance_menu(self, acc: dict) -> InlineKeyboardMarkup:
         aid = acc["id"]
         return InlineKeyboardMarkup([
-            [_btn(f"💸 Авто-вывод: {self._s(acc, 'autopay_enabled')}", f"tpay:{aid}")],
+            [_btn(f"💸 Авто-вывод — {self._s(acc, 'autopay_enabled')}", f"tpay:{aid}")],
             [_btn(f"💸 Процент вывода: {acc.get('autopay_percent', 100)}%", f"setpaypercent:{aid}")],
-            [_btn(f"🤝 Авто-трейд: {self._s(acc, 'autotrade_enabled', False)}", f"ttrade:{aid}")],
+            [_btn(f"🤝 Авто-трейд — {self._s(acc, 'autotrade_enabled', False)}", f"ttrade:{aid}")],
             [_btn("⬅️ Назад", f"autom:{aid}")],
         ])
 
     def _autom_containers_menu(self, acc: dict) -> InlineKeyboardMarkup:
         aid = acc["id"]
         return InlineKeyboardMarkup([
-            [_btn(f"📦⚡ Покупка через API: {self._s(acc, 'containers_api_enabled', False)}",
+            [_btn(f"📦⚡ Покупка через API — {self._s(acc, 'containers_api_enabled', False)}",
                   f"tcontapi:{aid}")],
             [_btn(f"📦⚡ Приоритет типов: {acc.get('containers_api_priority') or 'donate,expensive,budget'}",
                   f"setcontapipri:{aid}")],
@@ -479,15 +479,15 @@ class ControlBot:
     def _autom_repair_menu(self, acc: dict) -> InlineKeyboardMarkup:
         aid = acc["id"]
         return InlineKeyboardMarkup([
-            [_btn(f"🛠 Автопочинка телефонов: {self._s(acc, 'auto_repair_enabled', False)}", f"trepair:{aid}")],
-            [_btn(f"🌍 Чужая мастерская при нехватке: "
+            [_btn(f"🛠 Автопочинка телефонов — {self._s(acc, 'auto_repair_enabled', False)}", f"trepair:{aid}")],
+            [_btn(f"🌍 Чужая мастерская при нехватке — "
                   f"{self._s(acc, 'repair_external_workshop_enabled', False)}", f"textworkshop:{aid}")],
             [_btn(f"🌍 Владелец чужой мастерской: "
                   f"{acc.get('repair_external_workshop_owner') or '—'}", f"setworkshopowner:{aid}")],
             [_btn(f"🌍 Имя чужой мастерской: {acc.get('repair_external_workshop_name') or 'любая'}",
                   f"setworkshop:{aid}")],
-            [_btn(f"📥 Автопринятие заказов: {self._s(acc, 'auto_accept_enabled', False)}", f"taccept:{aid}")],
-            [_btn(f"⭐ Авто-отзыв (Критик): {self._s(acc, 'auto_review_enabled', False)}",
+            [_btn(f"📥 Автопринятие заказов — {self._s(acc, 'auto_accept_enabled', False)}", f"taccept:{aid}")],
+            [_btn(f"⭐ Авто-отзыв (Критик) — {self._s(acc, 'auto_review_enabled', False)}",
                   f"treview:{aid}")],
             [_btn("⬅️ Назад", f"autom:{aid}")],
         ])
@@ -495,7 +495,7 @@ class ControlBot:
     def _autom_farm_menu(self, acc: dict) -> InlineKeyboardMarkup:
         aid = acc["id"]
         return InlineKeyboardMarkup([
-            [_btn(f"🔧 Обслуживание фермы: "
+            [_btn(f"🔧 Обслуживание фермы — "
                   f"{self._s(acc, 'farm_maintenance_enabled', False)}", f"tfarmmaint:{aid}")],
             [_btn(f"🔧 Проверять раз в: {acc.get('farm_maintenance_interval', 3600)}с", f"setfarmtimes:{aid}")],
             [_btn(f"🎯 Целевое число телефонов: {acc.get('farm_target_phones', 11)}",
@@ -504,11 +504,11 @@ class ControlBot:
                   f"setfarmfill:{aid}")],
             [_btn(f"🏪 Редкость модели: {acc.get('farm_fill_rarity') or 'как в автозакупке'}",
                   f"setfarmfillrarity:{aid}")],
-            [_btn(f"💱 Продавать P-Coins за ТОчки: {self._s(acc, 'pcoin_exchange_enabled', False)}",
+            [_btn(f"💱 Продавать P-Coins за ТОчки — {self._s(acc, 'pcoin_exchange_enabled', False)}",
                   f"texchange:{aid}")],
-            [_btn(f"💱 Переводить P-Coins получателю: {self._s(acc, 'pcoin_send_enabled', False)}",
+            [_btn(f"💱 Переводить P-Coins получателю — {self._s(acc, 'pcoin_send_enabled', False)}",
                   f"tpcoinsend:{aid}")],
-            [_btn(f"⚡ Сброс перегрузки питания: {self._s(acc, 'power_watchdog_enabled', False)}",
+            [_btn(f"⚡ Сброс перегрузки питания — {self._s(acc, 'power_watchdog_enabled', False)}",
                   f"tpowerwatch:{aid}")],
             [_btn(f"⚡ Проверять раз в: {acc.get('power_watchdog_interval', 300)}с", f"setpowerwatch:{aid}")],
             [_btn("⬅️ Назад", f"autom:{aid}")],
@@ -517,7 +517,7 @@ class ControlBot:
     def _autom_phoneshop_menu(self, acc: dict) -> InlineKeyboardMarkup:
         aid = acc["id"]
         return InlineKeyboardMarkup([
-            [_btn(f"🏪 Автозакупка телефонов: {self._s(acc, 'phone_shop_enabled', False)}", f"tshop:{aid}")],
+            [_btn(f"🏪 Автозакупка телефонов — {self._s(acc, 'phone_shop_enabled', False)}", f"tshop:{aid}")],
             [_btn("🏪 Настройки автозакупки →", f"phoneshop:{aid}")],
             [_btn("⬅️ Назад", f"autom:{aid}")],
         ])
@@ -613,10 +613,18 @@ class ControlBot:
         rows.append([_btn("⬅️ Назад", f"actions:{aid}")])
         return InlineKeyboardMarkup(rows)
 
-    @staticmethod
-    def _task_sched(t: dict) -> str:
-        return (f"{t.get('interval', 3600)}с" if t.get("mode") == "interval"
+    _WEEKDAY_LABELS = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
+
+    @classmethod
+    def _task_sched(cls, t: dict) -> str:
+        base = (f"{t.get('interval', 3600)}с" if t.get("mode") == "interval"
                 else f"{t.get('time', '00:00')} МСК")
+        days = t.get("days")
+        if days:
+            base += " (" + "/".join(cls._WEEKDAY_LABELS[int(d) % 7] for d in days) + ")"
+        if int(t.get("jitter_seconds", 0) or 0) > 0:
+            base += f" ±{t['jitter_seconds']}с"
+        return base
 
     def _tasks_menu(self, acc: dict) -> InlineKeyboardMarkup:
         aid = acc["id"]
@@ -699,7 +707,9 @@ class ControlBot:
                 await self._redraw_dashboard(q)
                 return await q.answer()
             if data == "list":
-                await q.message.edit_text("📋 <b>Мои аккаунты</b>", reply_markup=self._accounts_menu(uid))
+                n = len(self._my_accounts(uid))
+                await q.message.edit_text(f"📋 <b>Мои аккаунты</b> (<code>{n}</code>)\n───",
+                                          reply_markup=self._accounts_menu(uid))
                 return await q.answer()
             if data == "add_phone":
                 self.states[uid] = {
@@ -773,48 +783,48 @@ class ControlBot:
             elif data.startswith("autom:"):
                 await q.message.edit_text(self._automation_text(acc), reply_markup=self._automation_menu(acc))
             elif data.startswith("autgame:"):
-                await q.message.edit_text(f"🎮 Игровой цикл — <b>{acc.get('name')}</b>",
+                await q.message.edit_text(f"🎮 Игровой цикл — <b>{acc.get('name')}</b>\n───",
                                           reply_markup=self._autom_game_menu(acc))
             elif data.startswith("cardmod:"):
                 await q.message.edit_text(await self._cards_module_text(acc), reply_markup=self._cards_module_menu(acc))
             elif data.startswith("autfin:"):
-                await q.message.edit_text(f"💰 Финансы — <b>{acc.get('name')}</b>",
+                await q.message.edit_text(f"💰 Финансы — <b>{acc.get('name')}</b>\n───",
                                           reply_markup=self._autom_finance_menu(acc))
             elif data.startswith("autcnt:"):
-                await q.message.edit_text(f"📦 Магазин контейнеров — <b>{acc.get('name')}</b>",
+                await q.message.edit_text(f"📦 Магазин контейнеров — <b>{acc.get('name')}</b>\n───",
                                           reply_markup=self._autom_containers_menu(acc))
             elif data.startswith("autrep:"):
-                await q.message.edit_text(f"🛠 Мастерская (ремонт) — <b>{acc.get('name')}</b>",
+                await q.message.edit_text(f"🛠 Мастерская (ремонт) — <b>{acc.get('name')}</b>\n───",
                                           reply_markup=self._autom_repair_menu(acc))
             elif data.startswith("autfrm:"):
-                await q.message.edit_text(f"🔧 Ферма — <b>{acc.get('name')}</b>",
+                await q.message.edit_text(f"🔧 Ферма — <b>{acc.get('name')}</b>\n───",
                                           reply_markup=self._autom_farm_menu(acc))
             elif data.startswith("autphn:"):
-                await q.message.edit_text(f"🏪 Магазин телефонов — <b>{acc.get('name')}</b>",
+                await q.message.edit_text(f"🏪 Магазин телефонов — <b>{acc.get('name')}</b>\n───",
                                           reply_markup=self._autom_phoneshop_menu(acc))
             elif data.startswith("phoneshop:"):
-                await q.message.edit_text(f"🏪 Настройки автозакупки телефонов — <b>{acc.get('name')}</b>",
+                await q.message.edit_text(f"🏪 Настройки автозакупки телефонов — <b>{acc.get('name')}</b>\n───",
                                           reply_markup=self._phone_shop_settings_menu(acc))
             elif data.startswith("intervals:"):
-                await q.message.edit_text(f"⏱ Интервалы — <b>{acc.get('name')}</b>",
+                await q.message.edit_text(f"⏱ Интервалы — <b>{acc.get('name')}</b>\n───",
                                           reply_markup=self._intervals_menu(acc))
             elif data.startswith("actions:"):
-                await q.message.edit_text(f"▶️ Действия — <b>{acc.get('name')}</b>",
+                await q.message.edit_text(f"▶️ Действия — <b>{acc.get('name')}</b>\n───",
                                           reply_markup=self._actions_menu(acc))
             elif data.startswith("actgame:"):
-                await q.message.edit_text(f"🎮 Игра — <b>{acc.get('name')}</b>",
+                await q.message.edit_text(f"🎮 Игра — <b>{acc.get('name')}</b>\n───",
                                           reply_markup=self._act_game_menu(acc))
             elif data.startswith("actfarm:"):
-                await q.message.edit_text(f"🔧 Ферма — <b>{acc.get('name')}</b>",
+                await q.message.edit_text(f"🔧 Ферма — <b>{acc.get('name')}</b>\n───",
                                           reply_markup=self._act_farm_menu(acc))
             elif data.startswith("actrepair:"):
-                await q.message.edit_text(f"🛠 Мастерская — <b>{acc.get('name')}</b>",
+                await q.message.edit_text(f"🛠 Мастерская — <b>{acc.get('name')}</b>\n───",
                                           reply_markup=self._act_repair_menu(acc))
             elif data.startswith("actshop:"):
-                await q.message.edit_text(f"🏪 Магазин — <b>{acc.get('name')}</b>",
+                await q.message.edit_text(f"🏪 Магазин — <b>{acc.get('name')}</b>\n───",
                                           reply_markup=self._act_shop_menu(acc))
             elif data.startswith("actfin:"):
-                await q.message.edit_text(f"💰 Финансы — <b>{acc.get('name')}</b>",
+                await q.message.edit_text(f"💰 Финансы — <b>{acc.get('name')}</b>\n───",
                                           reply_markup=self._act_fin_menu(acc))
             elif data.startswith("targets:"):
                 await q.message.edit_text(f"🎯 Получатели — <b>{acc.get('name')}</b>\n"
@@ -840,7 +850,7 @@ class ControlBot:
                 await q.answer(
                     f"«{acc.get('name')}» назначен получателем для {n} аккаунт(ов)" if n
                     else "Больше нет других аккаунтов", show_alert=True)
-                await q.message.edit_text(f"🎯 Получатели — <b>{acc.get('name')}</b>",
+                await q.message.edit_text(f"🎯 Получатели — <b>{acc.get('name')}</b>\n───",
                                           reply_markup=self._targets_menu(acc))
             elif data.startswith("toggle:"):
                 await self._toggle(q, acc, "enabled", redisplay="account")
@@ -1068,7 +1078,7 @@ class ControlBot:
                 await q.message.edit_text("🗑 Удалён.", reply_markup=self._accounts_menu(uid))
 
             elif data.startswith("tasks:"):
-                await q.message.edit_text(f"🧩 Задачи — <b>{acc.get('name')}</b>",
+                await q.message.edit_text(f"🧩 Задачи — <b>{acc.get('name')}</b>\n───",
                                           reply_markup=self._tasks_menu(acc))
             elif data.startswith("addtask:"):
                 self.states[uid] = {"flow": "addtask", "acc_id": aid, "step": "bot", "data": {}}
@@ -1097,7 +1107,13 @@ class ControlBot:
                 tid = int(data.split(":")[2])
                 acc["tasks"] = [t for t in acc.get("tasks", []) if t.get("id") != tid]
                 self.storage.save()
-                await q.message.edit_text(f"🧩 Задачи — <b>{acc.get('name')}</b>",
+                w = self.manager.workers.get(aid)
+                if w:
+                    # если этот id переиспользуют для новой задачи (_handle_addtask
+                    # берёт max(existing id)+1 — удалённый id снова свободен), воркер
+                    # не должен унаследовать старое время следующего запуска
+                    w._task_next.pop(tid, None)
+                await q.message.edit_text(f"🧩 Задачи — <b>{acc.get('name')}</b>\n───",
                                           reply_markup=self._tasks_menu(acc))
             await q.answer()
         except MessageNotModified:
@@ -1148,24 +1164,24 @@ class ControlBot:
         elif redisplay == "settings":
             await q.message.edit_text(self._settings_text(acc), reply_markup=self._settings_menu(acc))
         elif redisplay == "autgame":
-            await q.message.edit_text(f"🎮 Игровой цикл — <b>{acc.get('name')}</b>",
+            await q.message.edit_text(f"🎮 Игровой цикл — <b>{acc.get('name')}</b>\n───",
                                       reply_markup=self._autom_game_menu(acc))
         elif redisplay == "cardmod":
             await q.message.edit_text(await self._cards_module_text(acc), reply_markup=self._cards_module_menu(acc))
         elif redisplay == "autfin":
-            await q.message.edit_text(f"💰 Финансы — <b>{acc.get('name')}</b>",
+            await q.message.edit_text(f"💰 Финансы — <b>{acc.get('name')}</b>\n───",
                                       reply_markup=self._autom_finance_menu(acc))
         elif redisplay == "autcnt":
-            await q.message.edit_text(f"📦 Магазин контейнеров — <b>{acc.get('name')}</b>",
+            await q.message.edit_text(f"📦 Магазин контейнеров — <b>{acc.get('name')}</b>\n───",
                                       reply_markup=self._autom_containers_menu(acc))
         elif redisplay == "autrep":
-            await q.message.edit_text(f"🛠 Мастерская (ремонт) — <b>{acc.get('name')}</b>",
+            await q.message.edit_text(f"🛠 Мастерская (ремонт) — <b>{acc.get('name')}</b>\n───",
                                       reply_markup=self._autom_repair_menu(acc))
         elif redisplay == "autfrm":
-            await q.message.edit_text(f"🔧 Ферма — <b>{acc.get('name')}</b>",
+            await q.message.edit_text(f"🔧 Ферма — <b>{acc.get('name')}</b>\n───",
                                       reply_markup=self._autom_farm_menu(acc))
         elif redisplay == "autphn":
-            await q.message.edit_text(f"🏪 Магазин телефонов — <b>{acc.get('name')}</b>",
+            await q.message.edit_text(f"🏪 Магазин телефонов — <b>{acc.get('name')}</b>\n───",
                                       reply_markup=self._autom_phoneshop_menu(acc))
         else:  # "automation" — верхний уровень (группы)
             await q.message.edit_text(self._automation_text(acc), reply_markup=self._automation_menu(acc))
@@ -1483,7 +1499,7 @@ class ControlBot:
             acc[field] = int(val)
             self.storage.save()
             self.states.pop(uid, None)
-            await m.reply(f"⏱ Интервалы — <b>{acc.get('name')}</b>", reply_markup=self._intervals_menu(acc))
+            await m.reply(f"⏱ Интервалы — <b>{acc.get('name')}</b>\n───", reply_markup=self._intervals_menu(acc))
             return
         elif field == "drain_amount":
             if not val.isdigit():
@@ -1496,7 +1512,7 @@ class ControlBot:
             acc[field] = "" if val in ("-", "—", "нет") else val
             self.storage.save()
             self.states.pop(uid, None)
-            await m.reply(f"🛠 Мастерская (ремонт) — <b>{acc.get('name')}</b>",
+            await m.reply(f"🛠 Мастерская (ремонт) — <b>{acc.get('name')}</b>\n───",
                           reply_markup=self._autom_repair_menu(acc))
             return
         elif field == "containers_api_priority":
@@ -1508,7 +1524,7 @@ class ControlBot:
             acc[field] = ",".join(valid)
             self.storage.save()
             self.states.pop(uid, None)
-            await m.reply(f"📦 Магазин контейнеров — <b>{acc.get('name')}</b>",
+            await m.reply(f"📦 Магазин контейнеров — <b>{acc.get('name')}</b>\n───",
                           reply_markup=self._autom_containers_menu(acc))
             return
         elif field == "farm_maintenance_interval":
@@ -1518,7 +1534,7 @@ class ControlBot:
             acc[field] = int(val)
             self.storage.save()
             self.states.pop(uid, None)
-            await m.reply(f"🔧 Обслуживание фермы — <b>{acc.get('name')}</b>",
+            await m.reply(f"🔧 Обслуживание фермы — <b>{acc.get('name')}</b>\n───",
                           reply_markup=self._autom_farm_menu(acc))
             return
         elif field == "farm_target_phones":
@@ -1528,14 +1544,14 @@ class ControlBot:
             acc[field] = int(val)
             self.storage.save()
             self.states.pop(uid, None)
-            await m.reply(f"🔧 Обслуживание фермы — <b>{acc.get('name')}</b>",
+            await m.reply(f"🔧 Обслуживание фермы — <b>{acc.get('name')}</b>\n───",
                           reply_markup=self._autom_farm_menu(acc))
             return
         elif field in ("farm_fill_model", "farm_fill_rarity"):
             acc[field] = "" if val in ("-", "—", "нет") else val
             self.storage.save()
             self.states.pop(uid, None)
-            await m.reply(f"🔧 Обслуживание фермы — <b>{acc.get('name')}</b>",
+            await m.reply(f"🔧 Обслуживание фермы — <b>{acc.get('name')}</b>\n───",
                           reply_markup=self._autom_farm_menu(acc))
             return
         elif field == "power_watchdog_interval":
@@ -1545,7 +1561,7 @@ class ControlBot:
             acc[field] = int(val)
             self.storage.save()
             self.states.pop(uid, None)
-            await m.reply(f"🔧 Обслуживание фермы — <b>{acc.get('name')}</b>",
+            await m.reply(f"🔧 Обслуживание фермы — <b>{acc.get('name')}</b>\n───",
                           reply_markup=self._autom_farm_menu(acc))
             return
         elif field in ("avito_flip_price", "achievements_min_balance"):
@@ -1555,7 +1571,7 @@ class ControlBot:
             acc[field] = int(val)
             self.storage.save()
             self.states.pop(uid, None)
-            await m.reply(f"🎮 Игра — <b>{acc.get('name')}</b>", reply_markup=self._act_game_menu(acc))
+            await m.reply(f"🎮 Игра — <b>{acc.get('name')}</b>\n───", reply_markup=self._act_game_menu(acc))
             return
         elif field == "phone_shop_rarity":
             if not val:
@@ -1564,7 +1580,7 @@ class ControlBot:
             acc[field] = val
             self.storage.save()
             self.states.pop(uid, None)
-            await m.reply(f"🏪 Настройки автозакупки телефонов — <b>{acc.get('name')}</b>",
+            await m.reply(f"🏪 Настройки автозакупки телефонов — <b>{acc.get('name')}</b>\n───",
                           reply_markup=self._phone_shop_settings_menu(acc))
             return
         elif field == "phone_shop_quantity":
@@ -1574,7 +1590,7 @@ class ControlBot:
             acc[field] = int(val)
             self.storage.save()
             self.states.pop(uid, None)
-            await m.reply(f"🏪 Настройки автозакупки телефонов — <b>{acc.get('name')}</b>",
+            await m.reply(f"🏪 Настройки автозакупки телефонов — <b>{acc.get('name')}</b>\n───",
                           reply_markup=self._phone_shop_settings_menu(acc))
             return
         elif field == "autopay_percent":
@@ -1584,7 +1600,7 @@ class ControlBot:
             acc[field] = int(val)
             self.storage.save()
             self.states.pop(uid, None)
-            await m.reply(f"💰 Финансы — <b>{acc.get('name')}</b>",
+            await m.reply(f"💰 Финансы — <b>{acc.get('name')}</b>\n───",
                           reply_markup=self._autom_finance_menu(acc))
             return
         elif field == "mining_time":
@@ -1595,7 +1611,7 @@ class ControlBot:
             acc[field] = f"{int(mt.group(1)):02d}:{int(mt.group(2)):02d}"
             self.storage.save()
             self.states.pop(uid, None)
-            await m.reply(f"⏱ Интервалы — <b>{acc.get('name')}</b>", reply_markup=self._intervals_menu(acc))
+            await m.reply(f"⏱ Интервалы — <b>{acc.get('name')}</b>\n───", reply_markup=self._intervals_menu(acc))
             return
         elif field in ("payout_target", "trade_target"):
             if val in ("-", "—", "нет"):
@@ -1612,7 +1628,7 @@ class ControlBot:
                 acc[field] = bare if bare.isdigit() else f"@{bare}"
             self.storage.save()
             self.states.pop(uid, None)
-            await m.reply(f"🎯 Получатели — <b>{acc.get('name')}</b>",
+            await m.reply(f"🎯 Получатели — <b>{acc.get('name')}</b>\n───",
                           reply_markup=self._targets_menu(acc))
             return
         else:  # name

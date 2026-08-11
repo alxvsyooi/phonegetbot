@@ -152,11 +152,13 @@ async def main() -> None:
 
     report_task = asyncio.create_task(daily_report_loop(control, storage, settings))
     bridge_task = asyncio.create_task(redis_bridge.run(redis_client, control))
+    watchdog_task = asyncio.create_task(manager.watchdog_loop())
     try:
         await asyncio.Event().wait()
     finally:
         report_task.cancel()
         bridge_task.cancel()
+        watchdog_task.cancel()
         await manager.stop_all()
         await control.app.stop()
         await redis_client.close()

@@ -9,10 +9,49 @@ import re
 import time
 from datetime import datetime, timedelta, timezone
 
+from pyrogram.errors import FloodWait
+
 from storage import MINING_HOUR, MINING_MINUTE
 
 MSK = timezone(timedelta(hours=3))
 TBILISI = timezone(timedelta(hours=4))
+
+
+def all_buttons(message) -> list[str]:
+    """Плоский список подписей всех инлайн-кнопок сообщения. Общий хелпер —
+    раньше был дословно продублирован в shop.py и repair.py (farm.py держит свою
+    отдельную версию с чуть другой фильтрацией пустых кнопок, её не трогаем)."""
+    if message is None or not getattr(message, "reply_markup", None):
+        return []
+    return [getattr(b, "text", "") or "" for row in message.reply_markup.inline_keyboard for b in row]
+
+
+def find_button(message, substr: str) -> str | None:
+    """Первая кнопка, чья подпись содержит substr (без учёта регистра)."""
+    sub = substr.lower().strip()
+    for t in all_buttons(message):
+        if sub in t.lower():
+            return t
+    return None
+
+
+def msg_text(message) -> str:
+    """Текст ответа бота — из message.text ИЛИ message.caption (медиа-сообщения
+    подписывают текст через caption, не text). Общий хелпер вместо разбросанного
+    по farm.py/shop.py/repair.py/containers_api.py getattr(...)-дублирования."""
+    if message is None:
+        return ""
+    return getattr(message, "text", None) or getattr(message, "caption", None) or ""
+
+
+def backoff_seconds(exc: Exception, default: int = 60) -> int:
+    """FloodWait называет ТОЧНОЕ время ожидания — уважаем его вместо плоского
+    default-бэкоффа в циклах farm.py/shop.py/repair.py/autosend.py/
+    containers_api.py, иначе повторный запрос почти гарантированно словит
+    флудвейт снова и продлит его ещё дальше."""
+    if isinstance(exc, FloodWait):
+        return int(exc.value) + 1
+    return default
 
 
 def parse_hhmm(value: str | None) -> tuple[int, int]:
