@@ -30,6 +30,8 @@ from common import msg_text as _common_msg_text
 from ui_engine import Design
 
 BUFFER_SEC = 5  # буфер к кулдауну, чтобы не упереться ровно в секунду
+NO_REPLY_RETRY_SEC = 20  # бот не ответил вовсе (не кулдаун!) — короткий повтор, а не
+                          # полный card_interval/roulette_interval (см. _card_loop/_roulette_loop)
 
 # "через 1 ч 23 мин 45 сек", "через 59 мин", "через 12 сек"
 _TIME_RE = re.compile(
@@ -447,7 +449,13 @@ class FarmModule:
                 text = getattr(reply, "text", None) or getattr(reply, "caption", None)
                 cd = parse_cooldown(text)
                 default = int(self.account.get("card_interval", 3600))
-                self.card_next_ts = time.time() + (cd if cd is not None else default) + BUFFER_SEC
+                if reply is None:
+                    # таймаут ожидания ответа — это НЕ полный кулдаун, раньше тут молча
+                    # подставлялся default (обычно час) и карточки простаивали до часа
+                    # из-за одной транзиентной задержки бота
+                    self.card_next_ts = time.time() + NO_REPLY_RETRY_SEC
+                else:
+                    self.card_next_ts = time.time() + (cd if cd is not None else default) + BUFFER_SEC
 
                 if is_phone_won(text):
                     self._bump("phones")
@@ -500,12 +508,17 @@ class FarmModule:
                     cd = parse_cooldown(rtext)
                     delay = cd if cd is not None else default
                     self.last_roulette = f"🎰 крутили, кулдаун {fmt_duration(delay)} ({clock()})"
+                    self.roulette_next_ts = time.time() + delay + BUFFER_SEC
+                elif reply is None:
+                    # бот вообще не ответил на приглашение — таймаут, не кулдаун; раньше
+                    # это тоже подставляло default (обычно час) вместо скорого повтора
+                    self.last_roulette = f"⚠️ нет ответа ({clock()})"
+                    self.roulette_next_ts = time.time() + NO_REPLY_RETRY_SEC
                 else:
                     cd = parse_cooldown(text)
                     delay = cd if cd is not None else default
-                    self.last_roulette = (f"⚠️ нет ответа ({clock()})" if reply is None
-                                          else f"⏳ кулдаун {fmt_duration(delay)} ({clock()})")
-                self.roulette_next_ts = time.time() + delay + BUFFER_SEC
+                    self.last_roulette = f"⏳ кулдаун {fmt_duration(delay)} ({clock()})"
+                    self.roulette_next_ts = time.time() + delay + BUFFER_SEC
                 await self._publish_status(roulette_next_ts=self.roulette_next_ts, last_roulette=self.last_roulette)
             except asyncio.CancelledError:
                 raise
@@ -2068,7 +2081,12 @@ class FarmModule:
         empty_nums = sorted(n for n, i in slots.items() if i["status"] == "empty")
         fillable_nums = [n for n in empty_nums if not slot_models.get(str(n))]
         target = max(0, int(self.account.get("farm_target_phones", 11)))
-        installed = sum(1 for i in slots.values() if i.get("model") == fill_model)
+        # регистронезависимо — как и все остальные сравнения farm_fill_model в этом файле
+        # (см. _relieve_overload_now_impl); fill_model приходит свободным текстом от
+        # пользователя и может не совпасть по регистру с тем, как игра рендерит модель в
+        # слоте — иначе installed всегда 0, и докупка повторяется на каждый вызов
+        installed = sum(1 for i in slots.values()
+                        if i.get("model", "").strip().lower() == fill_model.lower())
 
         if installed >= target or not fillable_nums:
             self.last_farm_fill = (
