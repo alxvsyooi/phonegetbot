@@ -260,11 +260,19 @@ class ControlBot:
     def _accounts_menu(self, uid: int) -> InlineKeyboardMarkup:
         rows = []
         accs = sorted(self._my_accounts(uid), key=lambda a: 0 if a.get("is_main") else 1)
+        acc_buttons = []
         for acc in accs:
             w = self.manager.workers.get(acc["id"])
             mark = "🟢" if (w and w.running and acc.get("enabled", True)) else "🔴"
             crown = "👑 " if acc.get("is_main") else ""
-            rows.append([_btn(f"{mark} {crown}{acc.get('name')}", f"acc:{acc['id']}")])
+            acc_buttons.append(_btn(f"{mark} {crown}{acc.get('name')}", f"acc:{acc['id']}"))
+        if len(acc_buttons) >= 6:
+            # с 6+ аккаунтами список в один столбец растягивается и неудобно скроллить —
+            # 2 колонки разгружают экран (порядок сохраняется: 1-2, 3-4, 5-6, ...)
+            for i in range(0, len(acc_buttons), 2):
+                rows.append(acc_buttons[i:i + 2])
+        else:
+            rows.extend([b] for b in acc_buttons)
         rows.append([_btn("➕ По номеру", "add_phone"), _btn("➕ Session", "add_session")])
         rows.append([_btn("➕ Файл сессии", "add_sessionfile")])
         if self._my_accounts(uid):
@@ -407,9 +415,9 @@ class ControlBot:
         return InlineKeyboardMarkup([
             [_btn(f"🎮 Игровой цикл — {Design.status_badge_plain(game_on)}", f"autgame:{aid}")],
             [_btn(f"💰 Финансы — {Design.status_badge_plain(fin_on)}", f"autfin:{aid}")],
-            [_btn(f"📦 Магазин контейнеров — {Design.status_badge_plain(cnt_on)}", f"autcnt:{aid}")],
-            [_btn(f"🛠 Мастерская (ремонт) — {Design.status_badge_plain(rep_on)}", f"autrep:{aid}")],
             [_btn(f"🔧 Ферма — {Design.status_badge_plain(frm_on)}", f"autfrm:{aid}")],
+            [_btn(f"🛠 Мастерская (ремонт) — {Design.status_badge_plain(rep_on)}", f"autrep:{aid}")],
+            [_btn(f"📦 Магазин контейнеров — {Design.status_badge_plain(cnt_on)}", f"autcnt:{aid}")],
             [_btn(f"🏪 Магазин телефонов — {Design.status_badge_plain(shop_on)}", f"autphn:{aid}")],
             [_btn("⬅️ Назад", f"farm:{aid}")],
         ])
@@ -572,11 +580,6 @@ class ControlBot:
         aid = acc["id"]
         return InlineKeyboardMarkup([
             [_btn("⛏ Собрать майнинг сейчас", f"mine:{aid}")],
-            [_btn("🧾 Такс (баланс)", f"taxx:{aid}")],
-            [_btn(f"📜 Достижения (мин. {acc.get('achievements_min_balance', 150000)})",
-                  f"achieve:{aid}")],
-            [_btn(f"✏️ Цена флипа: {acc.get('avito_flip_price', 5000)}", f"setflipprice:{aid}"),
-             _btn(f"✏️ Мин. баланс: {acc.get('achievements_min_balance', 150000)}", f"setachievemin:{aid}")],
             [_btn("⬅️ Назад", f"actions:{aid}")],
         ])
 
@@ -598,6 +601,7 @@ class ControlBot:
         aid = acc["id"]
         return InlineKeyboardMarkup([
             [_btn("🛠 Почистить нерабочие сейчас", f"repairnow:{aid}")],
+            [_btn("🔩 Починить оборудование", f"repaireqnow:{aid}")],
             [_btn("⬅️ Назад", f"actions:{aid}")],
         ])
 
@@ -611,7 +615,6 @@ class ControlBot:
     def _act_fin_menu(self, acc: dict) -> InlineKeyboardMarkup:
         aid = acc["id"]
         rows = [
-            [_btn("💰 Прокачать аккаунт (от 7 млн)", f"upgradeacc:{aid}")],
             [_btn("💸 Перевести человеку", f"paystart:{aid}")],
             [_btn("🤝 Трейд с человеком", f"tradestart:{aid}")],
             [_btn("🔄 Слить телефоны получателю", f"exch:{aid}")],
@@ -712,6 +715,16 @@ class ControlBot:
     async def _on_callback(self, q: CallbackQuery) -> None:
         data = q.data
         uid = q.from_user.id
+        if data != "home":
+            # ушли с экрана Dashboard на любой другой (то же сообщение, просто
+            # edit_text) — если не снять регистрацию, redis_bridge.py на ближайшем
+            # Celery-тике/алерте молча перерисует ЭТО ЖЕ сообщение обратно в Dashboard
+            # (RenderEngine пропускает перерисовку, только если её собственный текст
+            # не изменился — а countdown на дэшборде меняется почти каждый тик), и
+            # пользователя «выкидывает» из Автоматизации/Действий на главный экран —
+            # баг, воспроизведён вживую. "home" — единственный путь, что оставляет
+            # сообщение Dashboard-ом, поэтому только он не снимает регистрацию.
+            self.dashboards.forget(uid)
         try:
             if data == "welcome_start":
                 self.states.pop(uid, None)
@@ -1047,6 +1060,8 @@ class ControlBot:
                 await q.message.edit_text("Сколько покупать за раз (число), либо 0 — максимум доступного:")
             elif data.startswith("repairnow:"):
                 await self._start_repair_now(q, aid)
+            elif data.startswith("repaireqnow:"):
+                await self._start_repair_equipment_now(q, aid)
             elif data.startswith("farmmaintnow:"):
                 await self._start_farm_maintenance_now(q, aid)
             elif data.startswith("fillfarmnow:"):
@@ -1339,6 +1354,19 @@ class ControlBot:
         result = await w.repair_now()
         acc = self.storage.get(aid)
         await self._safe_edit(q, self._account_text(acc) + f"\n\n🛠 {result}", self._account_menu(acc))
+
+    async def _start_repair_equipment_now(self, q: CallbackQuery, aid: int) -> None:
+        w = self.manager.workers.get(aid)
+        if not w or not w.running:
+            return await q.answer("Аккаунт не запущен", show_alert=True)
+        await q.answer("⏳ Чиню оборудование мастерской...")
+        asyncio.create_task(self._run_repair_equipment_now(q, aid, w))
+
+    async def _run_repair_equipment_now(self, q: CallbackQuery, aid: int, w) -> None:
+        result = await w.repair_equipment_now()
+        acc = self.storage.get(aid)
+        await self._safe_edit(q, f"🛠 Мастерская — <b>{acc.get('name')}</b>\n───\n🔩 {result}",
+                              self._act_repair_menu(acc))
 
     async def _start_farm_maintenance_now(self, q: CallbackQuery, aid: int) -> None:
         w = self.manager.workers.get(aid)
