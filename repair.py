@@ -403,6 +403,7 @@ class RepairModule:
                     )
                 interval = max(60, int(self.repair_cfg.get("check_interval", 300)))
                 self.repair_next_ts = time.time() + interval
+                await self._publish_status(repair_next_ts=self.repair_next_ts, last_repair=self.last_repair)
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
@@ -410,6 +411,7 @@ class RepairModule:
                     return
                 self.last_repair = f"ошибка: {e}"
                 self.repair_next_ts = time.time() + _backoff_seconds(e, default=300)
+                await self._publish_status(repair_next_ts=self.repair_next_ts, last_repair=self.last_repair)
                 await asyncio.sleep(5)
 
     async def repair_now(self) -> str:

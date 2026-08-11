@@ -86,6 +86,7 @@ class ShopModule:
                     continue
                 hour, minute = parse_hhmm(self.account.get("mining_time"))
                 self.shop_next_ts = time.time() + seconds_until_msk(hour, minute)
+                await self._publish_status(shop_next_ts=self.shop_next_ts, last_shop=self.last_shop)
 
                 now = datetime.now(MSK)
                 due = now.hour == hour and now.minute == minute and last_fired != now.date()
@@ -110,6 +111,7 @@ class ShopModule:
                 if await self._handle_dead_session(e):
                     return
                 self.last_shop = f"ошибка: {e}"
+                await self._publish_status(last_shop=self.last_shop)
                 await asyncio.sleep(_backoff_seconds(e, default=20))
 
     # _click_retry — теперь общий метод в automation.py._WorkerBase (было
