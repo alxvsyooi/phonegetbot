@@ -720,6 +720,7 @@ class ControlBot:
         if acc.get("is_main"):
             rows.append([_btn(f"💰 Сумма слива твинкам: {acc.get('drain_amount', 0)}", f"setdrain:{aid}")])
             rows.append([_btn("💧 Слить твинкам сейчас", f"draindo:{aid}")])
+            rows.append([_btn("📥 Собрать всё с твинков", f"collectall:{aid}")])
         rows.append([_btn("⬅️ Назад", f"actions:{aid}")])
         return InlineKeyboardMarkup(rows)
 
@@ -1093,6 +1094,8 @@ class ControlBot:
                     "Пришли число, либо 0 чтобы отключить:")
             elif data.startswith("draindo:"):
                 await self._start_drain(q, acc)
+            elif data.startswith("collectall:"):
+                await self._start_collect_all(q, acc)
             elif data.startswith("trepair:"):
                 await self._toggle(q, acc, "auto_repair_enabled", redisplay="autrep")
             elif data.startswith("textworkshop:"):
@@ -1440,6 +1443,40 @@ class ControlBot:
             results.append(f"• {t.get('name')}: {res}")
         acc = self.storage.get(aid)
         text = self._account_text(acc) + "\n\n💧 <b>Слив твинкам:</b>\n" + "\n".join(results)
+        await self._safe_edit(q, text, self._account_menu(acc))
+
+    async def _start_collect_all(self, q: CallbackQuery, acc: dict) -> None:
+        """📥 Собрать всё с твинков — обратное «💧 Слить твинкам»: КАЖДЫЙ твинк сам
+        выводит 100% очков и трейдит телефоны на главный аккаунт, независимо от
+        своих обычно настроенных получателей (target_override), по очереди."""
+        if not acc.get("is_main"):
+            return await q.answer("Только для 👑 главного аккаунта", show_alert=True)
+        main_ident = self._twink_ident(acc)
+        if not main_ident:
+            return await q.answer("У главного аккаунта нет username/tg_id — некуда собирать", show_alert=True)
+        twinks = [a for a in self._my_accounts(acc.get("owner_id")) if a["id"] != acc["id"]]
+        if not twinks:
+            return await q.answer("Нет других аккаунтов (твинков)", show_alert=True)
+        await q.answer(f"⏳ Собираю с {len(twinks)} твинк(ов) на главный (это надолго)...")
+        asyncio.create_task(self._run_collect_all(q, acc["id"], twinks, main_ident))
+
+    async def _run_collect_all(self, q: CallbackQuery, aid: int, twinks: list[dict], main_ident: str) -> None:
+        results = []
+        for t in twinks:
+            tw = self.manager.workers.get(t["id"])
+            if not tw or not tw.running:
+                results.append(f"• {t.get('name')}: аккаунт не запущен, пропущен")
+                continue
+            pay_res = await tw.payout_to_now(main_ident)
+            trade_res = await self.manager.run_trade(t["id"], target_override=main_ident)
+            # следующий авто-цикл этого твинка не должен сработать почти сразу же —
+            # сдвигаем его так же, как это делают сами _autopay_loop/_autotrade_loop
+            # после обычного срабатывания (см. farm.py)
+            tw.autopay_next_ts = time.time() + max(60, int(t.get("autopay_interval", 14400)))
+            tw.autotrade_next_ts = time.time() + max(60, int(t.get("autotrade_interval", 14400)))
+            results.append(f"• {t.get('name')}: 💸 {pay_res} | 🔄 {trade_res}")
+        acc = self.storage.get(aid)
+        text = self._account_text(acc) + "\n\n📥 <b>Собрано с твинков:</b>\n" + "\n".join(results)
         await self._safe_edit(q, text, self._account_menu(acc))
 
     async def _start_repair_now(self, q: CallbackQuery, aid: int) -> None:
