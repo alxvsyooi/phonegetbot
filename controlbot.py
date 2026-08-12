@@ -1116,13 +1116,13 @@ class ControlBot:
                 await self._toggle(q, acc, "self_commands_enabled", redisplay="autosend")
             elif data.startswith("setcard:"):
                 self._ask(uid, aid, "card_interval")
-                await q.message.edit_text("Отправь интервал карточек в секундах (>=10):")
+                await q.message.edit_text("Отправь интервал карточек в минутах (>=1):")
             elif data.startswith("setroul:"):
                 self._ask(uid, aid, "roulette_interval")
-                await q.message.edit_text("Отправь интервал рулетки в секундах (>=10):")
+                await q.message.edit_text("Отправь интервал рулетки в минутах (>=1):")
             elif data.startswith("setmininterval:"):
                 self._ask(uid, aid, "mining_check_interval")
-                await q.message.edit_text("Отправь раз во сколько секунд проверять/собирать майнинг (>=60):")
+                await q.message.edit_text("Отправь раз во сколько минут проверять/собирать майнинг (>=1):")
             elif data.startswith("setmtime:"):
                 self._ask(uid, aid, "mining_time")
                 await q.message.edit_text(
@@ -1131,14 +1131,14 @@ class ControlBot:
                 )
             elif data.startswith("setpayinterval:"):
                 self._ask(uid, aid, "autopay_interval")
-                await q.message.edit_text("Отправь интервал авто-вывода очков в секундах (>=60):")
+                await q.message.edit_text("Отправь интервал авто-вывода очков в минутах (>=1):")
             elif data.startswith("settradeinterval:"):
                 self._ask(uid, aid, "autotrade_interval")
-                await q.message.edit_text("Отправь интервал авто-трейда в секундах (>=60):")
+                await q.message.edit_text("Отправь интервал авто-трейда в минутах (>=1):")
             elif data.startswith("setpcoininterval:"):
                 self._ask(uid, aid, "pcoin_exchange_interval")
                 await q.message.edit_text(
-                    "Отправь интервал проверки биржи P-Coins (продажа/перевод) в секундах (>=60):")
+                    "Отправь интервал проверки биржи P-Coins (продажа/перевод) в минутах (>=1):")
             elif data.startswith("setpaypercent:"):
                 self._ask(uid, aid, "autopay_percent")
                 await q.message.edit_text(
@@ -1804,16 +1804,16 @@ class ControlBot:
         field = state["field"]
         val = m.text.strip()
         if field in ("card_interval", "roulette_interval"):
-            if not val.isdigit() or int(val) < 10:
-                await m.reply("Нужно число секунд (>=10). Ещё раз:")
+            if not val.isdigit() or int(val) < 1:
+                await m.reply("Нужно число минут (>=1). Ещё раз:")
                 return
-            acc[field] = int(val)
+            acc[field] = int(val) * 60
         elif field in ("autopay_interval", "autotrade_interval", "mining_check_interval",
                        "pcoin_exchange_interval"):
-            if not val.isdigit() or int(val) < 60:
-                await m.reply("Нужно число секунд (>=60). Ещё раз:")
+            if not val.isdigit() or int(val) < 1:
+                await m.reply("Нужно число минут (>=1). Ещё раз:")
                 return
-            acc[field] = int(val)
+            acc[field] = int(val) * 60
             self.storage.save()
             self.states.pop(uid, None)
             await m.reply(self._intervals_text(acc), reply_markup=self._intervals_menu(acc))
