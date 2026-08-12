@@ -695,6 +695,7 @@ class ControlBot:
             f"• 🎁 Ежедневная: <code>{acc.get('mining_time', '01:00')} МСК</code>",
             line("💸", "Авто-вывод", acc.get("autopay_interval", 14400)),
             line("🤝", "Авто-трейд", acc.get("autotrade_interval", 14400)),
+            line("💱", "P-Coins", acc.get("pcoin_exchange_interval", 14400)),
         ])
         return (
             "⏱️ <b>НАСТРОЙКА ИНТЕРВАЛОВ</b>\n"
@@ -711,10 +712,12 @@ class ControlBot:
         mt = acc.get("mining_time", "01:00")
         pi = fmt_duration(int(acc.get("autopay_interval", 14400)))
         ti = fmt_duration(int(acc.get("autotrade_interval", 14400)))
+        pci = fmt_duration(int(acc.get("pcoin_exchange_interval", 14400)))
         return InlineKeyboardMarkup([
             [_btn(f"🎴 Карточки: {ci}", f"setcard:{aid}"), _btn(f"🎰 Рулетка: {ri}", f"setroul:{aid}")],
             [_btn(f"⛏️ Майнинг: {mi}", f"setmininterval:{aid}"), _btn(f"🎁 Награда: {mt}", f"setmtime:{aid}")],
             [_btn(f"💸 Вывод: {pi}", f"setpayinterval:{aid}"), _btn(f"🤝 Трейд: {ti}", f"settradeinterval:{aid}")],
+            [_btn(f"💱 P-Coins: {pci}", f"setpcoininterval:{aid}")],
             [_btn("⬅️ Назад в меню", f"farm:{aid}")],
         ])
 
@@ -1132,6 +1135,10 @@ class ControlBot:
             elif data.startswith("settradeinterval:"):
                 self._ask(uid, aid, "autotrade_interval")
                 await q.message.edit_text("Отправь интервал авто-трейда в секундах (>=60):")
+            elif data.startswith("setpcoininterval:"):
+                self._ask(uid, aid, "pcoin_exchange_interval")
+                await q.message.edit_text(
+                    "Отправь интервал проверки биржи P-Coins (продажа/перевод) в секундах (>=60):")
             elif data.startswith("setpaypercent:"):
                 self._ask(uid, aid, "autopay_percent")
                 await q.message.edit_text(
@@ -1801,14 +1808,15 @@ class ControlBot:
                 await m.reply("Нужно число секунд (>=10). Ещё раз:")
                 return
             acc[field] = int(val)
-        elif field in ("autopay_interval", "autotrade_interval", "mining_check_interval"):
+        elif field in ("autopay_interval", "autotrade_interval", "mining_check_interval",
+                       "pcoin_exchange_interval"):
             if not val.isdigit() or int(val) < 60:
                 await m.reply("Нужно число секунд (>=60). Ещё раз:")
                 return
             acc[field] = int(val)
             self.storage.save()
             self.states.pop(uid, None)
-            await m.reply(f"⏱ Интервалы — <b>{acc.get('name')}</b>\n───", reply_markup=self._intervals_menu(acc))
+            await m.reply(self._intervals_text(acc), reply_markup=self._intervals_menu(acc))
             return
         elif field == "drain_amount":
             if not val.isdigit():
@@ -1920,7 +1928,7 @@ class ControlBot:
             acc[field] = f"{int(mt.group(1)):02d}:{int(mt.group(2)):02d}"
             self.storage.save()
             self.states.pop(uid, None)
-            await m.reply(f"⏱ Интервалы — <b>{acc.get('name')}</b>\n───", reply_markup=self._intervals_menu(acc))
+            await m.reply(self._intervals_text(acc), reply_markup=self._intervals_menu(acc))
             return
         elif field in ("payout_target", "trade_target"):
             if val in ("-", "—", "нет"):
