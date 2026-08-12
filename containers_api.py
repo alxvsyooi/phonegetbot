@@ -83,6 +83,7 @@ class ContainersApiModule:
         # (см. automation.py) — тут решает скорость реакции на восполнение запасов
         msg = await self._send_and_wait(bot, open_cmd, timeout=15, throttle=False)
         if msg is None:
+            print(f"[{self.name}] containers_api: нет ответа на «{open_cmd}» за 15с")
             return None
         mk = getattr(msg, "reply_markup", None)
         web_btn = None
@@ -96,6 +97,10 @@ class ContainersApiModule:
                 if web_btn:
                     break
         if web_btn is None:
+            all_texts = [getattr(b, "text", "") for row in (getattr(mk, "inline_keyboard", None) or [])
+                        for b in row]
+            print(f"[{self.name}] containers_api: не нашёл кнопку-webapp с маркером "
+                  f"«{entry_marker}» — кнопки в ответе: {all_texts!r}")
             return None
 
         peer = await self.client.resolve_peer(bot)
@@ -105,15 +110,20 @@ class ContainersApiModule:
                     bot=peer, platform=cfg.get("platform", "web"), url=web_btn.web_app.url,
                 )
             )
-        except Exception:
+        except Exception as e:  # noqa: BLE001
+            print(f"[{self.name}] containers_api: RequestSimpleWebView упал: {type(e).__name__}: {e}")
             return None
         url = getattr(result, "url", None)
         if not url or "#" not in url:
+            print(f"[{self.name}] containers_api: вебвью вернуло url без фрагмента: {url!r}")
             return None
         frag = url.split("#", 1)[1]
         qs = urllib.parse.parse_qs(frag)
         values = qs.get("tgWebAppData")
-        return values[0] if values else None
+        if not values:
+            print(f"[{self.name}] containers_api: нет tgWebAppData во фрагменте: {frag!r}")
+            return None
+        return values[0]
 
     # ---------- сырые вызовы API ----------
     async def _containers_api_post(self, cfg: dict, endpoint: str, payload: dict) -> dict | None:
@@ -124,8 +134,14 @@ class ContainersApiModule:
                 async with session.post(
                     url, json=payload, timeout=aiohttp.ClientTimeout(total=10),
                 ) as resp:
+                    if resp.status != 200:
+                        body = await resp.text()
+                        print(f"[{self.name}] containers_api: POST {endpoint} -> HTTP {resp.status}: "
+                              f"{body[:300]!r}")
+                        return None
                     return await resp.json()
-        except Exception:
+        except Exception as e:  # noqa: BLE001
+            print(f"[{self.name}] containers_api: POST {endpoint} упал: {type(e).__name__}: {e}")
             return None
 
     # ---------- initData с коротким кэшем (см. пояснение в шапке файла) ----------
@@ -149,6 +165,8 @@ class ContainersApiModule:
                 # закэшированная initData могла протухнуть раньше TTL — один раз
                 # форсируем полный хендшейк заново, прежде чем сдаться
                 return await self._fetch_state(cfg, force_refresh=True)
+            print(f"[{self.name}] containers_api: state API не success даже после форс-рефреша: "
+                  f"{state!r}")
             return init_data, None
         return init_data, state
 
@@ -192,6 +210,8 @@ class ContainersApiModule:
                     limits["donate_bought"] = int(limits.get("donate_bought", 0)) + qty
                 else:
                     limits["normal_bought"] = int(limits.get("normal_bought", 0)) + qty
+            else:
+                print(f"[{self.name}] containers_api: buy {c_type} x{qty} не success: {res!r}")
 
         if bought_parts:
             self.last_containers_api = f"📦 куплено: {', '.join(bought_parts)} ({clock()} {today_msk()})"
