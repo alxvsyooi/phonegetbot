@@ -1521,8 +1521,8 @@ class ControlBot:
 
     async def _start_collect_all(self, q: CallbackQuery, acc: dict) -> None:
         """📥 Собрать всё с твинков — обратное «💧 Слить твинкам»: КАЖДЫЙ твинк сам
-        выводит 100% очков и трейдит телефоны на главный аккаунт, независимо от
-        своих обычно настроенных получателей (target_override), по очереди."""
+        выводит 100% очков, трейдит телефоны и переводит P-Coins на главный аккаунт,
+        независимо от своих обычно настроенных получателей (target_override), по очереди."""
         if not acc.get("is_main"):
             return await q.answer("Только для 👑 главного аккаунта", show_alert=True)
         main_ident = self._twink_ident(acc)
@@ -1543,12 +1543,14 @@ class ControlBot:
                 continue
             pay_res = await tw.payout_to_now(main_ident)
             trade_res = await self.manager.run_trade(t["id"], target_override=main_ident)
+            pcoin_res = await tw.send_pcoins_to_now(main_ident)
             # следующий авто-цикл этого твинка не должен сработать почти сразу же —
-            # сдвигаем его так же, как это делают сами _autopay_loop/_autotrade_loop
-            # после обычного срабатывания (см. farm.py)
+            # сдвигаем его так же, как это делают сами _autopay_loop/_autotrade_loop/
+            # _pcoin_exchange_loop после обычного срабатывания (см. farm.py)
             tw.autopay_next_ts = time.time() + max(60, int(t.get("autopay_interval", 14400)))
             tw.autotrade_next_ts = time.time() + max(60, int(t.get("autotrade_interval", 14400)))
-            results.append(f"• {t.get('name')}: 💸 {pay_res} | 🔄 {trade_res}")
+            tw.pcoin_exchange_next_ts = time.time() + max(60, int(t.get("pcoin_exchange_interval", 14400)))
+            results.append(f"• {t.get('name')}: 💸 {pay_res} | 🔄 {trade_res} | 💱 {pcoin_res}")
         acc = self.storage.get(aid)
         text = self._account_text(acc) + "\n\n📥 <b>Собрано с твинков:</b>\n" + "\n".join(results)
         await self._safe_edit(q, text, self._account_menu(acc))
