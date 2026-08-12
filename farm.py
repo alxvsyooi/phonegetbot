@@ -1482,17 +1482,9 @@ class FarmModule:
             return self.last_pcoin_exchange
 
     async def send_pcoins_now(self) -> str:
-        """💱 Переводит P-Coins из кошелька получателю (account.payout_target) через
-        ту же биржу («/texchange» -> «Отправить P-Coins»), вместо продажи за ТОчки —
+        """💱 Переводит P-Coins из кошелька получателю (account.payout_target) —
         альтернатива dump_pcoins_now() для твинков, чей P-Coins должны копиться на
-        основном аккаунте, а не превращаться в ТОчки твинка. Флоу (проверено
-        вживую): открыть биржу -> «Отправить P-Coins» -> ответить получателем
-        (@username/id) ТЕКСТОМ -> ответить количеством ТЕКСТОМ -> «Пропустить»
-        комментарий -> «Подтвердить» перевод. Отдельного сообщения об успехе нет —
-        то же сообщение просто редактируется обратно в «Биржа P-Coin» с уменьшенным
-        балансом (баланс здесь не перепроверяем повторно текстом — см. общий баг-
-        паттерн этого бота: текстовая команда посреди навигации сбрасывает диалог).
-        Переводит весь кошелёк."""
+        основном аккаунте, а не превращаться в ТОчки твинка. См. _send_pcoins."""
         if not self.client or not self.running:
             self.last_pcoin_exchange = "аккаунт не запущен"
             return self.last_pcoin_exchange
@@ -1503,7 +1495,31 @@ class FarmModule:
         if not target:
             self.last_pcoin_exchange = "⚠️ не задан получатель (payout_target) — задай в 🎯 Получатели"
             return self.last_pcoin_exchange
+        return await self._send_pcoins(target)
 
+    async def send_pcoins_to_now(self, target: str) -> str:
+        """Как send_pcoins_now(), но с явным получателем вместо настроенного
+        payout_target — для «▶️ Действия -> Финансы -> Собрать с твинков»: твинк
+        шлёт P-Coins СЮДА (главному аккаунту), независимо от своего обычного
+        получателя."""
+        if not self.client or not self.running:
+            self.last_pcoin_exchange = "аккаунт не запущен"
+            return self.last_pcoin_exchange
+        if self._trade_mode:
+            self.last_pcoin_exchange = "идёт трейд — попробуй чуть позже"
+            return self.last_pcoin_exchange
+        return await self._send_pcoins(target)
+
+    async def _send_pcoins(self, target: str) -> str:
+        """Общая часть send_pcoins_now()/send_pcoins_to_now() — переводит ВЕСЬ
+        кошелёк P-Coins явно заданному получателю через биржу («/texchange» ->
+        «Отправить P-Coins»). Флоу (проверено вживую): открыть биржу -> «Отправить
+        P-Coins» -> ответить получателем (@username/id) ТЕКСТОМ -> ответить
+        количеством ТЕКСТОМ -> «Пропустить» комментарий -> «Подтвердить» перевод.
+        Отдельного сообщения об успехе нет — то же сообщение просто редактируется
+        обратно в «Биржа P-Coin» с уменьшенным балансом (баланс здесь не
+        перепроверяем повторно текстом — см. общий баг-паттерн этого бота:
+        текстовая команда посреди навигации сбрасывает диалог)."""
         cfg = self.exchange_cfg
         bot = cfg.get("bot") or CARDS_BOT
         open_cmd = cfg.get("open_command") or EXCHANGE_WORD
