@@ -156,6 +156,12 @@ class ShopModule:
             rarity_btn = _find_button(entry, rarity)
             if not rarity_btn:
                 self.last_shop = f"⚠️ редкость «{rarity}» не найдена в магазине ({clock()})"
+                # диагностика живого репорта: редкость визуально ЕСТЬ при ручном заходе,
+                # но автозакупка её не находит — печатаем, что реально пришло в ответ на
+                # open_cmd (подозрение: словили чужое/непрошенное сообщение бота вместо
+                # экрана магазина — см. FIFO-корреляцию в automation.py._pending)
+                print(f"[{self.name}] shop: редкость «{rarity}» не найдена; текст ответа: "
+                      f"{_msg_text(entry)[:200]!r}; кнопки: {_all_buttons(entry)!r}")
                 return self.last_shop
             clicked, listing = await self._click_retry(entry, rarity_btn, bot, cfg)
             if not clicked or listing is None:
@@ -165,6 +171,8 @@ class ShopModule:
             model_btn, listing = await self._find_model(bot, listing, cfg, model_pref)
             if not model_btn:
                 self.last_shop = f"⚠️ не нашёл модель в «{rarity}» ({clock()})"
+                print(f"[{self.name}] shop: модель не найдена (pref={model_pref!r}); "
+                      f"кнопки последней страницы: {_all_buttons(listing)!r}")
                 return self.last_shop
             clicked, detail = await self._click_retry(listing, model_btn, bot, cfg)
             if not clicked or detail is None:
