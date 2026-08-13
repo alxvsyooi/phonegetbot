@@ -16,6 +16,7 @@ from contextlib import AsyncExitStack
 from pyrogram.errors import FloodWait
 
 from automation import AccountWorker
+from common import clock
 from storage import Storage
 
 
@@ -49,6 +50,8 @@ class Manager:
         self.containers_api_cfg = containers_api_cfg or {}
         self.workers: dict[int, AccountWorker] = {}
         self._trade_locks: dict[int, asyncio.Lock] = {}  # acc_id -> лок (см. run_trade)
+        self._owner_trade_locks: dict[int, asyncio.Lock] = {}  # owner_id -> общая очередь
+                                                                 # трейдов одного владельца (см. run_trade)
         # выставляется в main.py ПОСЛЕ создания ControlBot: даёт воркерам возможность
         # слать владельцу интерактивные алерты (инлайн-кнопки) через управляющего бота,
         # а не текстом от самого фарм-аккаунта (у обычных user-сессий callback-кнопки
@@ -229,6 +232,13 @@ class Manager:
             self._trade_locks[acc_id] = lock
         return lock
 
+    def _lock_for_owner(self, owner_id: int) -> asyncio.Lock:
+        lock = self._owner_trade_locks.get(owner_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._owner_trade_locks[owner_id] = lock
+        return lock
+
     async def run_trade(self, farm_id: int, target_override: str | None = None) -> str:
         """Слить телефоны фарма на trade_target. Повтор, пока коллекция > repeat_threshold.
 
@@ -240,7 +250,14 @@ class Manager:
         может быть только в ОДНОМ обмене (обе стороны занимают клиент). Поэтому
         run_trade берёт блокировку на farm и на main (если есть): если получатель
         сейчас занят другим фармом — этот вызов встаёт в очередь и ждёт своего часа,
-        а не проваливается мгновенно. Разные пары фарм/получатель работают параллельно."""
+        а не проваливается мгновенно. Разные пары фарм/получатель работают параллельно.
+
+        ДОПОЛНИТЕЛЬНО — общая очередь на владельца (_lock_for_owner): с несколькими
+        аккаунтами на одинаковом интервале авто-трейда (напр. 11 аккаунтов раз в 48ч)
+        их next_ts может почти совпасть, и раньше они все стартовали бы трейд
+        параллельно ("кто успеет"). Теперь у одного владельца одновременно идёт
+        РОВНО один трейд — остальные ждут здесь своей очереди (репорт пользователя:
+        хочет по одному, а не всех разом)."""
         from trade import TradeSession, SoloTradeSession
 
         farm = self.workers.get(farm_id)
@@ -251,42 +268,49 @@ class Manager:
             return "не задан получатель трейда — задайте в 🎯 Получатели"
 
         owner = farm.account.get("owner_id")
-        main = self._match_own_worker(owner, farm_id, target)
-        if main and not main.running:
-            main = None  # свой аккаунт есть, но не запущен — работаем как с внешним
+        owner_lock = self._lock_for_owner(owner)
+        if owner_lock.locked():
+            farm.last_exchange = f"⏳ трейд в очереди — ждёт своего аккаунта ({clock()})"
 
-        # если не нашли «свой» аккаунт под target — раньше это молча превращалось в
-        # SoloTradeSession (ждёт, пока ЧЕЛОВЕК вручную нажмёт «Принять» — а получатель
-        # тоже управляется этим ботом без человека рядом, обмен просто висит до
-        # таймаута, репорт пользователя). Диагностика для самопроверки: показываем, с
-        # какими identifiers своих аккаунтов target НЕ совпал — обычно опечатка/
-        # устаревший @username (см. фикс синхронизации username в automation.py)
-        mismatch_hint = ""
-        if main is None:
-            siblings = [
-                w for w in self.workers.values()
-                if w.account.get("owner_id") == owner and w.id != farm_id
-            ]
-            if siblings:
-                idents = ", ".join(
-                    f"{s.name}=@{s.account.get('username') or '?'}/{s.account.get('tg_id') or '?'}"
-                    for s in siblings
-                )
-                mismatch_hint = (
-                    f" ⚠️ получатель «{target}» не совпал ни с одним своим аккаунтом "
-                    f"({idents}) — если это должен быть свой аккаунт, обмен зависнет "
-                    f"до таймаута (никто не нажмёт «Принять»); проверь username/id"
-                )
-                print(f"[manager] трейд {farm.name} -> «{target}»: {mismatch_hint}")
+        async with owner_lock:
+            main = self._match_own_worker(owner, farm_id, target)
+            if main and not main.running:
+                main = None  # свой аккаунт есть, но не запущен — работаем как с внешним
 
-        # блокируем ОБОИХ участников в стабильном порядке (по id) — без этого два
-        # обмена с общим участником могут задедлочиться, ожидая друг друга крест-накрест
-        lock_ids = sorted({farm.id} | ({main.id} if main else set()))
-        async with AsyncExitStack() as stack:
-            for lid in lock_ids:
-                await stack.enter_async_context(self._lock_for(lid))
-            result = await self._run_trade_passes(farm, main, target)
-            return result + mismatch_hint
+            # если не нашли «свой» аккаунт под target — раньше это молча превращалось в
+            # SoloTradeSession (ждёт, пока ЧЕЛОВЕК вручную нажмёт «Принять» — а получатель
+            # тоже управляется этим ботом без человека рядом, обмен просто висит до
+            # таймаута, репорт пользователя). Диагностика для самопроверки: показываем, с
+            # какими identifiers своих аккаунтов target НЕ совпал — обычно опечатка/
+            # устаревший @username (см. фикс синхронизации username в automation.py)
+            mismatch_hint = ""
+            if main is None:
+                siblings = [
+                    w for w in self.workers.values()
+                    if w.account.get("owner_id") == owner and w.id != farm_id
+                ]
+                if siblings:
+                    idents = ", ".join(
+                        f"{s.name}=@{s.account.get('username') or '?'}/{s.account.get('tg_id') or '?'}"
+                        for s in siblings
+                    )
+                    mismatch_hint = (
+                        f" ⚠️ получатель «{target}» не совпал ни с одним своим аккаунтом "
+                        f"({idents}) — если это должен быть свой аккаунт, обмен зависнет "
+                        f"до таймаута (никто не нажмёт «Принять»); проверь username/id"
+                    )
+                    print(f"[manager] трейд {farm.name} -> «{target}»: {mismatch_hint}")
+
+            # блокируем ОБОИХ участников в стабильном порядке (по id) — без этого два
+            # обмена с общим участником могут задедлочиться, ожидая друг друга крест-накрест
+            # (владельческая очередь выше уже гарантирует единственность в рамках owner,
+            # но main может принадлежать ДРУГОМУ владельцу — эта блокировка всё ещё нужна)
+            lock_ids = sorted({farm.id} | ({main.id} if main else set()))
+            async with AsyncExitStack() as stack:
+                for lid in lock_ids:
+                    await stack.enter_async_context(self._lock_for(lid))
+                result = await self._run_trade_passes(farm, main, target)
+                return result + mismatch_hint
 
     async def _run_trade_passes(self, farm, main, target: str) -> str:
         from trade import TradeSession, SoloTradeSession
