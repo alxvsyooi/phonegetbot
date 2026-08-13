@@ -543,15 +543,22 @@ class ControlBot:
             ("pcoin_send_enabled", False), ("power_watchdog_enabled", False),
         ])
         shop_on = self._category_on(acc, [("phone_shop_enabled", False)])
-        return InlineKeyboardMarkup([
+        rows = [
             [_btn(f"🎮 Игровой цикл — {Design.status_badge_plain(game_on)}", f"autgame:{aid}")],
             [_btn(f"💰 Финансы — {Design.status_badge_plain(fin_on)}", f"autfin:{aid}")],
             [_btn(f"🔧 Ферма — {Design.status_badge_plain(frm_on)}", f"autfrm:{aid}")],
             [_btn(f"🛠 Мастерская (ремонт) — {Design.status_badge_plain(rep_on)}", f"autrep:{aid}")],
-            [_btn(f"📦 Магазин контейнеров — {Design.status_badge_plain(cnt_on)}", f"autcnt:{aid}")],
+            # магазин контейнеров ненадёжен на реальном рестоке (живой репорт) — до
+            # починки показываем «в разработке» всем, реальное меню доступно только
+            # владельцу-админу через отдельную кнопку «🧪 Тест» ниже
+            [_btn("📦 Магазин контейнеров — 🚧 в разработке", f"autcnt:{aid}")],
             [_btn(f"🏪 Магазин телефонов — {Design.status_badge_plain(shop_on)}", f"autphn:{aid}")],
-            [_btn("⬅️ Назад", f"farm:{aid}")],
-        ])
+        ]
+        if acc.get("owner_id") in self.admin_ids:
+            rows.append([_btn(f"🧪 Тест: Магазин контейнеров — {Design.status_badge_plain(cnt_on)}",
+                              f"testcnt:{aid}")])
+        rows.append([_btn("⬅️ Назад", f"farm:{aid}")])
+        return InlineKeyboardMarkup(rows)
 
     def _autom_game_menu(self, acc: dict) -> InlineKeyboardMarkup:
         aid = acc["id"]
@@ -614,6 +621,14 @@ class ControlBot:
             [_btn(f"🤝 Авто-трейд — {self._s(acc, 'autotrade_enabled', False)}", f"ttrade:{aid}")],
             [_btn("⬅️ Назад", f"autom:{aid}")],
         ])
+
+    @staticmethod
+    def _containers_stub_text() -> str:
+        return (
+            "📦 <b>МАГАЗИН КОНТЕЙНЕРОВ</b>\n───\n"
+            "🚧 Функция в разработке — временно недоступна для обычных аккаунтов, "
+            "чиним надёжность покупки на рестоке."
+        )
 
     def _autom_containers_menu(self, acc: dict) -> InlineKeyboardMarkup:
         aid = acc["id"]
@@ -1005,7 +1020,12 @@ class ControlBot:
                 await q.message.edit_text(f"💰 Финансы — <b>{acc.get('name')}</b>\n───",
                                           reply_markup=self._autom_finance_menu(acc))
             elif data.startswith("autcnt:"):
-                await q.message.edit_text(f"📦 Магазин контейнеров — <b>{acc.get('name')}</b>\n───",
+                await q.message.edit_text(self._containers_stub_text(),
+                                          reply_markup=InlineKeyboardMarkup([[_btn("⬅️ Назад", f"autom:{aid}")]]))
+            elif data.startswith("testcnt:"):
+                if acc.get("owner_id") not in self.admin_ids:
+                    return await q.answer("Только для админа", show_alert=True)
+                await q.message.edit_text(f"🧪 Тест: Магазин контейнеров — <b>{acc.get('name')}</b>\n───",
                                           reply_markup=self._autom_containers_menu(acc))
             elif data.startswith("autrep:"):
                 await q.message.edit_text(f"🛠 Мастерская (ремонт) — <b>{acc.get('name')}</b>\n───",
