@@ -408,6 +408,7 @@ class ControlBot:
                      _btn("🔑 По Pyrogram / Telethon Session", "add_session")])
         if self._my_accounts(uid):
             rows.append([_btn("☎️ Показать все номера", "allphones")])
+            rows.append([_btn("⏱ Интервалы для всех", "bulkintervals")])
         rows.append([_btn("⬅️ Назад", "home")])
         return InlineKeyboardMarkup(rows)
 
@@ -738,6 +739,95 @@ class ControlBot:
             [_btn("⬅️ Назад в меню", f"farm:{aid}")],
         ])
 
+    # ---------- ⏱ Интервалы для всех аккаунтов разом (bulk-редактор) ----------
+    # Те же поля, что и в _intervals_menu, но правит их сразу у всех аккаунтов
+    # владельца — чтобы не заходить в каждый по отдельности (см. запрос
+    # пользователя). Поле и его валидация переиспользуют то же соглашение
+    # (минуты, кроме mining_time — ЧЧ:ММ), см. _handle_bulk_set.
+    _BULK_INTERVAL_FIELDS = [
+        ("card_interval", "🎴", "Карточки", 3600),
+        ("roulette_interval", "🎰", "Рулетка", 3600),
+        ("mining_check_interval", "⛏️", "Майнинг", 14400),
+        ("autopay_interval", "💸", "Авто-вывод", 14400),
+        ("autotrade_interval", "🤝", "Авто-трейд", 14400),
+        ("pcoin_exchange_interval", "💱", "P-Coins", 14400),
+        ("farm_maintenance_interval", "🔧", "Обслуживание фермы", 3600),
+        ("power_watchdog_interval", "⚡", "Перегрузка питания", 300),
+    ]
+
+    def _bulk_field_display(self, accs: list[dict], field: str, default: int) -> str:
+        values = {int(a.get(field, default)) for a in accs}
+        if len(values) == 1:
+            return fmt_duration(values.pop())
+        return f"разные ({len(values)})"
+
+    def _bulk_intervals_text(self, uid: int) -> str:
+        accs = self._my_accounts(uid)
+        mt_values = {a.get("mining_time", "01:00") for a in accs}
+        mt_display = mt_values.pop() if len(mt_values) == 1 else f"разные ({len(mt_values)})"
+        body = "\n".join([
+            f"• {emoji} {label}: <code>{self._bulk_field_display(accs, field, default)}</code>"
+            for field, emoji, label, default in self._BULK_INTERVAL_FIELDS
+        ] + [f"• 🎁 Ежедневная: <code>{mt_display} МСК</code>"])
+        return (
+            "⏱️ <b>ИНТЕРВАЛЫ ДЛЯ ВСЕХ АККАУНТОВ</b>\n"
+            f"Аккаунтов: <code>{len(accs)}</code>\n\n"
+            f"<blockquote>{body}</blockquote>\n\n"
+            "Нажмите на интервал, чтобы задать одно значение сразу для всех аккаунтов:"
+        )
+
+    def _bulk_intervals_menu(self, uid: int) -> InlineKeyboardMarkup:
+        accs = self._my_accounts(uid)
+        rows = []
+        for i in range(0, len(self._BULK_INTERVAL_FIELDS), 2):
+            row = []
+            for field, emoji, label, default in self._BULK_INTERVAL_FIELDS[i:i + 2]:
+                row.append(_btn(f"{emoji} {label}: {self._bulk_field_display(accs, field, default)}",
+                                 f"bulkset:{field}"))
+            rows.append(row)
+        mt_values = {a.get("mining_time", "01:00") for a in accs}
+        mt_display = mt_values.pop() if len(mt_values) == 1 else f"разные ({len(mt_values)})"
+        rows.append([_btn(f"🎁 Ежедневная: {mt_display}", "bulkset:mining_time")])
+        rows.append([_btn("⬅️ Назад", "list")])
+        return InlineKeyboardMarkup(rows)
+
+    _BULK_SET_PROMPTS = {
+        "card_interval": "🎴 Раз во сколько минут тянуть карточку",
+        "roulette_interval": "🎰 Раз во сколько минут крутить рулетку",
+        "mining_check_interval": "⛏️ Раз во сколько минут проверять майнинг",
+        "autopay_interval": "💸 Раз во сколько минут делать авто-вывод",
+        "autotrade_interval": "🤝 Раз во сколько минут делать авто-трейд",
+        "pcoin_exchange_interval": "💱 Раз во сколько минут продавать P-Coins",
+        "farm_maintenance_interval": "🔧 Раз во сколько минут проверять обслуживание фермы",
+        "power_watchdog_interval": "⚡ Раз во сколько минут проверять перегрузку питания",
+    }
+
+    async def _handle_bulk_set(self, m: Message, state: dict) -> None:
+        uid = m.from_user.id
+        field = state["field"]
+        val = m.text.strip()
+        accs = self._my_accounts(uid)
+        if not accs:
+            self.states.pop(uid, None)
+            return
+        if field == "mining_time":
+            mt = re.match(r"^\s*(\d{1,2})[:.\s](\d{1,2})\s*$", val)
+            if not mt or not (0 <= int(mt.group(1)) < 24 and 0 <= int(mt.group(2)) < 60):
+                await m.reply("Формат ЧЧ:ММ, напр. 01:00. Ещё раз:")
+                return
+            new_val = f"{int(mt.group(1)):02d}:{int(mt.group(2)):02d}"
+        else:
+            if not val.isdigit() or int(val) < 1:
+                await m.reply("Нужно число минут (>=1). Ещё раз:")
+                return
+            new_val = int(val) * 60
+        for acc in accs:
+            acc[field] = new_val
+        self.storage.save()
+        self.states.pop(uid, None)
+        await m.reply(f"✅ Обновлено у {len(accs)} аккаунт(ов).\n\n{self._bulk_intervals_text(uid)}",
+                      reply_markup=self._bulk_intervals_menu(uid))
+
     def _actions_text(self, acc: dict) -> str:
         crown = "👑 " if acc.get("is_main") else ""
         return (
@@ -991,6 +1081,21 @@ class ControlBot:
                 await q.answer("⏳ Рассылаю...")
                 asyncio.create_task(self._run_broadcast(q, uid, text))
                 return
+            if data == "bulkintervals":
+                await q.message.edit_text(self._bulk_intervals_text(uid), reply_markup=self._bulk_intervals_menu(uid))
+                return await q.answer()
+            if data.startswith("bulkset:"):
+                if not self._my_accounts(uid):
+                    return await q.answer("Нет аккаунтов", show_alert=True)
+                field = data.split(":", 1)[1]
+                self.states[uid] = {"flow": "bulkset", "field": field}
+                n = len(self._my_accounts(uid))
+                if field == "mining_time":
+                    prompt = "🎁 Во сколько (ЧЧ:ММ по МСК) забирать ежедневную награду"
+                else:
+                    prompt = f"{self._BULK_SET_PROMPTS.get(field, 'Новое значение')} (в минутах, >=1)"
+                await q.message.edit_text(f"{prompt} — применится сразу ко <b>всем {n} аккаунтам</b>:")
+                return await q.answer()
 
             # дальше всё про конкретный аккаунт — проверяем владение
             aid = int(data.split(":")[1])
@@ -1806,6 +1911,8 @@ class ControlBot:
             return
         if state.get("flow") == "set":
             await self._handle_set(m, state)
+        elif state.get("flow") == "bulkset":
+            await self._handle_bulk_set(m, state)
         elif state.get("flow") == "add":
             await self._handle_add(m, state)
         elif state.get("flow") == "addtask":
