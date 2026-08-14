@@ -207,6 +207,9 @@ class RepairModule:
         best_btn, best_load, best_msg = None, None, first_msg
         msg = first_msg
         for _ in range(max_pages):
+            if self._trade_mode:
+                # трейд стартовал посреди пролистывания страниц — см. automation.py._on_message
+                return best_btn, best_msg
             loads = {name.strip().lower(): int(cnt) for name, cnt in _TOOL_LOAD_RE.findall(_msg_text(msg))}
             candidates = [t for t in _all_buttons(msg) if t.strip() and not any(s in t.lower() for s in skip)]
             for t in candidates:
@@ -313,6 +316,10 @@ class RepairModule:
         max_pages = max(1, int(cfg.get("workshop_owner_max_pages", 30)))
         msg = workshop_pick
         for _ in range(max_pages):
+            if self._trade_mode:
+                # трейд стартовал посреди пролистывания (до 30 страниц по умолчанию) —
+                # см. automation.py._on_message
+                return None
             for idx, own in _WORKSHOP_OWNER_RE.findall(_msg_text(msg)):
                 if own.lower() in owner_set:
                     btn = _find_button(msg, f"мастерская №{idx}")
@@ -346,6 +353,9 @@ class RepairModule:
         ни в одной категории приоритетной модели не нашлось — тогда repair_now()
         падает обратно на обычный порядок «первая категория -> первая модель»."""
         for cat_label in _nonempty_categories(cats_msg):
+            if self._trade_mode:
+                # трейд стартовал посреди перебора категорий — см. automation.py._on_message
+                return None
             clicked, models_msg = await self._click_retry(cats_msg, cat_label, bot, cfg)
             if not clicked or models_msg is None:
                 continue

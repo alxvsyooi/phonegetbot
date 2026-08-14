@@ -318,7 +318,7 @@ class _TradeCore:
         if any(p._trade_mode for p in participants):
             return "трейд уже выполняется"
         for p in participants:
-            p.enter_trade_mode()
+            await p.enter_trade_mode()
         self.farm.last_exchange = f"🔄 {self._start_text()}"
         try:
             result = await asyncio.wait_for(self._run(), timeout=self._overall_timeout())
