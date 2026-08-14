@@ -593,7 +593,7 @@ class ControlBot:
             "",
             "<b>Параметры:</b>",
             "├ Режим:    <code>команда в чат @phonegetcardsbot</code>",
-            f"└ Интервал: <code>{interval}с</code>",
+            f"└ Интервал: <code>{fmt_duration(int(interval))}</code> (меняется на экране ⏱ Интервалы)",
             "",
         ]
         if enabled:
@@ -609,7 +609,6 @@ class ControlBot:
         en = acc.get("card_enabled", True)
         return InlineKeyboardMarkup([
             [_btn("🔴 Выключить модуль" if en else "🟢 Включить модуль", f"tcard:{aid}")],
-            [_btn(f"⏱️ Изменить интервал ({acc.get('card_interval', 3600)}с)", f"setcard:{aid}")],
             [_btn("⬅️ Назад в Автоматизацию", f"autgame:{aid}")],
         ])
 
@@ -662,7 +661,6 @@ class ControlBot:
         return InlineKeyboardMarkup([
             [_btn(f"🔧 Обслуживание фермы — "
                   f"{self._s(acc, 'farm_maintenance_enabled', False)}", f"tfarmmaint:{aid}")],
-            [_btn(f"🔧 Проверять раз в: {acc.get('farm_maintenance_interval', 3600)}с", f"setfarmtimes:{aid}")],
             [_btn(f"🎯 Целевое число телефонов: {acc.get('farm_target_phones', 11)}",
                   f"setfarmtarget:{aid}")],
             [_btn(f"📱 Модель для пополнения: {acc.get('farm_fill_model') or '—'}",
@@ -675,7 +673,6 @@ class ControlBot:
                   f"tpcoinsend:{aid}")],
             [_btn(f"⚡ Сброс перегрузки питания — {self._s(acc, 'power_watchdog_enabled', False)}",
                   f"tpowerwatch:{aid}")],
-            [_btn(f"⚡ Проверять раз в: {acc.get('power_watchdog_interval', 300)}с", f"setpowerwatch:{aid}")],
             [_btn("⬅️ Назад", f"autom:{aid}")],
         ])
 
@@ -700,8 +697,7 @@ class ControlBot:
         crown = "👑 " if acc.get("is_main") else ""
 
         def line(emoji: str, label: str, seconds) -> str:
-            s = int(seconds)
-            return f"• {emoji} {label}: <code>{fmt_duration(s)}</code> ({s}с)"
+            return f"• {emoji} {label}: <code>{fmt_duration(int(seconds))}</code>"
 
         body = "\n".join([
             line("🎴", "Карточки", acc.get("card_interval", 3600)),
@@ -711,6 +707,8 @@ class ControlBot:
             line("💸", "Авто-вывод", acc.get("autopay_interval", 14400)),
             line("🤝", "Авто-трейд", acc.get("autotrade_interval", 14400)),
             line("💱", "P-Coins", acc.get("pcoin_exchange_interval", 14400)),
+            line("🔧", "Обслуживание фермы", acc.get("farm_maintenance_interval", 3600)),
+            line("⚡", "Перегрузка питания", acc.get("power_watchdog_interval", 300)),
         ])
         return (
             "⏱️ <b>НАСТРОЙКА ИНТЕРВАЛОВ</b>\n"
@@ -728,11 +726,15 @@ class ControlBot:
         pi = fmt_duration(int(acc.get("autopay_interval", 14400)))
         ti = fmt_duration(int(acc.get("autotrade_interval", 14400)))
         pci = fmt_duration(int(acc.get("pcoin_exchange_interval", 14400)))
+        fmi = fmt_duration(int(acc.get("farm_maintenance_interval", 3600)))
+        pwi = fmt_duration(int(acc.get("power_watchdog_interval", 300)))
         return InlineKeyboardMarkup([
             [_btn(f"🎴 Карточки: {ci}", f"setcard:{aid}"), _btn(f"🎰 Рулетка: {ri}", f"setroul:{aid}")],
             [_btn(f"⛏️ Майнинг: {mi}", f"setmininterval:{aid}"), _btn(f"🎁 Награда: {mt}", f"setmtime:{aid}")],
             [_btn(f"💸 Вывод: {pi}", f"setpayinterval:{aid}"), _btn(f"🤝 Трейд: {ti}", f"settradeinterval:{aid}")],
-            [_btn(f"💱 P-Coins: {pci}", f"setpcoininterval:{aid}")],
+            [_btn(f"💱 P-Coins: {pci}", f"setpcoininterval:{aid}"),
+             _btn(f"🔧 Ферма: {fmi}", f"setfarmtimes:{aid}")],
+            [_btn(f"⚡ Питание: {pwi}", f"setpowerwatch:{aid}")],
             [_btn("⬅️ Назад в меню", f"farm:{aid}")],
         ])
 
@@ -813,13 +815,13 @@ class ControlBot:
 
     @classmethod
     def _task_sched(cls, t: dict) -> str:
-        base = (f"{t.get('interval', 3600)}с" if t.get("mode") == "interval"
+        base = (fmt_duration(int(t.get('interval', 3600))) if t.get("mode") == "interval"
                 else f"{t.get('time', '00:00')} МСК")
         days = t.get("days")
         if days:
             base += " (" + "/".join(cls._WEEKDAY_LABELS[int(d) % 7] for d in days) + ")"
         if int(t.get("jitter_seconds", 0) or 0) > 0:
-            base += f" ±{t['jitter_seconds']}с"
+            base += f" ±{fmt_duration(int(t['jitter_seconds']))}"
         return base
 
     def _tasks_menu(self, acc: dict) -> InlineKeyboardMarkup:
@@ -1223,7 +1225,7 @@ class ControlBot:
                 await self._toggle(q, acc, "farm_maintenance_enabled", redisplay="autfrm")
             elif data.startswith("setfarmtimes:"):
                 self._ask(uid, aid, "farm_maintenance_interval")
-                await q.message.edit_text("Отправь раз во сколько секунд проверять обслуживание фермы (>=60):")
+                await q.message.edit_text("Отправь раз во сколько минут проверять обслуживание фермы (>=1):")
             elif data.startswith("setfarmtarget:"):
                 self._ask(uid, aid, "farm_target_phones")
                 await q.message.edit_text(
@@ -1249,8 +1251,8 @@ class ControlBot:
             elif data.startswith("setpowerwatch:"):
                 self._ask(uid, aid, "power_watchdog_interval")
                 await q.message.edit_text(
-                    "⚡ Раз во сколько секунд проверять питание/охлаждение фермы на аварийную "
-                    "перегрузку (число, >=60):")
+                    "⚡ Раз во сколько минут проверять питание/охлаждение фермы на аварийную "
+                    "перегрузку (число, >=1):")
             elif data.startswith("tshop:"):
                 await self._toggle(q, acc, "phone_shop_enabled", redisplay="autphn")
             elif data.startswith("setrarity:"):
@@ -1828,6 +1830,10 @@ class ControlBot:
                 await m.reply("Нужно число минут (>=1). Ещё раз:")
                 return
             acc[field] = int(val) * 60
+            self.storage.save()
+            self.states.pop(uid, None)
+            await m.reply(self._intervals_text(acc), reply_markup=self._intervals_menu(acc))
+            return
         elif field in ("autopay_interval", "autotrade_interval", "mining_check_interval",
                        "pcoin_exchange_interval"):
             if not val.isdigit() or int(val) < 1:
@@ -1865,14 +1871,13 @@ class ControlBot:
                           reply_markup=self._autom_containers_menu(acc))
             return
         elif field == "farm_maintenance_interval":
-            if not val.isdigit() or int(val) < 60:
-                await m.reply("Нужно число секунд (>=60). Ещё раз:")
+            if not val.isdigit() or int(val) < 1:
+                await m.reply("Нужно число минут (>=1). Ещё раз:")
                 return
-            acc[field] = int(val)
+            acc[field] = int(val) * 60
             self.storage.save()
             self.states.pop(uid, None)
-            await m.reply(f"🔧 Обслуживание фермы — <b>{acc.get('name')}</b>\n───",
-                          reply_markup=self._autom_farm_menu(acc))
+            await m.reply(self._intervals_text(acc), reply_markup=self._intervals_menu(acc))
             return
         elif field == "farm_target_phones":
             if not val.isdigit():
@@ -1892,14 +1897,13 @@ class ControlBot:
                           reply_markup=self._autom_farm_menu(acc))
             return
         elif field == "power_watchdog_interval":
-            if not val.isdigit() or int(val) < 60:
-                await m.reply("Нужно число секунд (>=60). Ещё раз:")
+            if not val.isdigit() or int(val) < 1:
+                await m.reply("Нужно число минут (>=1). Ещё раз:")
                 return
-            acc[field] = int(val)
+            acc[field] = int(val) * 60
             self.storage.save()
             self.states.pop(uid, None)
-            await m.reply(f"🔧 Обслуживание фермы — <b>{acc.get('name')}</b>\n───",
-                          reply_markup=self._autom_farm_menu(acc))
+            await m.reply(self._intervals_text(acc), reply_markup=self._intervals_menu(acc))
             return
         elif field in ("avito_flip_price", "achievements_min_balance"):
             if not val.isdigit() or int(val) <= 0:
