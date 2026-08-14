@@ -1748,6 +1748,8 @@ class FarmModule:
             for num in working_nums:
                 if len(removed) >= max_removals:
                     break
+                if self._trade_mode:  # см. комментарий в _farm_maintenance_now_impl
+                    break
                 model = slots[num].get("model")
                 fresh = await self._send_and_wait(bot, mining_cmd, timeout=20)
                 if fresh is None:
@@ -1833,6 +1835,8 @@ class FarmModule:
         if cats is None:
             return 0
         for rarity_label in _rarity_scan_order(preferred_rarity):
+            if self._trade_mode:  # трейд стартовал посреди перебора редкостей
+                return 0
             cat_btn = _find_rarity_button(cats, rarity_label)
             if not cat_btn:
                 continue
@@ -1954,6 +1958,8 @@ class FarmModule:
             if not toggle_cooldown and occupied < target and candidate_by_slot:
                 availability: dict[str, bool] = {}
                 for n, model in candidate_by_slot.items():
+                    if self._trade_mode:  # см. комментарий в цикле извлечения ниже
+                        break
                     if model not in availability:
                         availability[model] = await self._has_working_phone(
                             model, cfg, rarity_by_model.get(model))
@@ -2230,6 +2236,8 @@ class FarmModule:
         low_model = model_name.strip().lower()
         current = msg
         for _ in range(max_pages):
+            if self._trade_mode:  # трейд стартовал посреди пролистывания страниц
+                return None, current
             for t in _all_buttons(current):
                 name_part = re.sub(r"\s*\(x?\d+\)\s*$", "", t.strip(), flags=re.IGNORECASE).strip()
                 if name_part.lower() == low_model:
