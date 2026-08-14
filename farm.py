@@ -1919,8 +1919,14 @@ class FarmModule:
 
             # для каждого пустого слота модель-кандидат: своя память важнее общего
             # fill_model (снятый на ремонт телефон должен вернуться на своё же место).
-            # редкость известна заранее ТОЛЬКО для общего fill_model (farm_fill_rarity) —
-            # для «своей памяти» слота редкость могла быть любой, полный перебор нужен
+            # farm_slot_models НЕ хранит редкость (её не показывает сам экран фермы) —
+            # раньше «своя память»-слоты вообще не получали preferred_rarity и всегда
+            # уходили в полный перебор с «Ширпотреб» (тот же паттерн, что уже когда-то
+            # чинили для fill_model — см. _rarity_scan_order, репорт «зачем-то заходит
+            # в Ширпотреб»). fill_rarity — не гарантированно верная редкость для КОНКРЕТНО
+            # этого телефона, но разумная подсказка (проверяется первой, при промахе
+            # цикл в _count_working_phone/_reinstall_phone_slot всё равно перебирает
+            # остальные редкости) — лучше, чем не иметь подсказки вообще
             candidate_by_slot: dict[int, str] = {}
             rarity_by_model: dict[str, str | None] = {}
             for n in empty_nums_all:
@@ -1928,7 +1934,7 @@ class FarmModule:
                 model = remembered or fill_model
                 if model:
                     candidate_by_slot[n] = model
-                    if not remembered and fill_rarity:
+                    if fill_rarity and model not in rarity_by_model:
                         rarity_by_model[model] = fill_rarity
 
             # у майнинга часовой таймер накопления, который сбрасывается КАЖДЫЙ раз при
@@ -2272,7 +2278,13 @@ class FarmModule:
             if confirm_btn:
                 await self._click_step(bot, installed, confirm_btn, cfg, timeout=15)
             return True
-        return False  # рабочего экземпляра этой модели пока нет (ремонт не завершён)
+        # рабочего экземпляра этой модели пока нет (ремонт не завершён) — либо
+        # он ЕСТЬ, но не нашёлся (напр. дальше max_pages страниц одной редкости);
+        # логируем, какие редкости вообще проверили, чтобы отличить одно от другого
+        print(f"[{self.name}] farm: не нашёл рабочий «{model_name}» для слота №{num} "
+              f"(preferred_rarity={preferred_rarity!r}, проверено: "
+              f"{_rarity_scan_order(preferred_rarity)!r})")
+        return False
 
     async def _execute_pay(self, target: str, amount: int, timeout: int = 15) -> str:
         """Отправляет «/pay target amount» и доводит перевод до конца.
