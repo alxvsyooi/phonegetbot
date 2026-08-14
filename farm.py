@@ -1973,6 +1973,16 @@ class FarmModule:
             extracted: list[str] = []
             just_extracted_models: list[str] = []
             for num in broken_nums:
+                # trade_mode проверяется только один раз на входе в эту функцию — если
+                # трейд стартует ПОКА этот цикл уже кликает по слотам, наши собственные
+                # клики/ожидания «Слот N -> Добавить телефон -> ...» переплетаются с
+                # ожиданиями trade.py в ТОМ ЖЕ чате с ботом и рискуют перехватить чужой
+                # ответ (репорт: ручной трейд внезапно показывал список телефонов вместо
+                # панели обмена — оба флоу используют один и тот же маркер кнопки
+                # «добавить телефон»). Прерываемся сразу, следующий проход обслуживания
+                # доделает оставшееся.
+                if self._trade_mode:
+                    break
                 fresh = await self._send_and_wait(bot, mining_cmd, timeout=20)
                 if fresh is None:
                     break
@@ -1985,6 +1995,8 @@ class FarmModule:
 
             reinstalled: list[str] = []
             for num in pending_empty_nums:
+                if self._trade_mode:  # см. комментарий в цикле извлечения выше
+                    break
                 expected = candidate_by_slot.get(num)
                 if not expected:
                     continue
@@ -2256,6 +2268,8 @@ class FarmModule:
             return False
 
         for rarity_label in _rarity_scan_order(preferred_rarity):
+            if self._trade_mode:  # трейд стартовал посреди перебора редкостей — см. вызывающий цикл
+                return False
             cat_btn = _find_rarity_button(rarity_msg, rarity_label)
             if not cat_btn:
                 continue
