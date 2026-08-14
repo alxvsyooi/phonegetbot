@@ -269,11 +269,35 @@ class _WorkerBase:
     async def _handle_proactive(self, message) -> None:
         pass
 
+    def _resolve_pending(self, uname: str, message) -> bool:
+        queue = self._pending.get(uname)
+        if not queue:
+            return False
+        fut = queue.pop(0)
+        if not queue:
+            self._pending.pop(uname, None)
+        if not fut.done():
+            fut.set_result(message)
+        return True
+
     # ---------- приём сообщений ----------
     async def _on_message(self, _client, message) -> None:
         uname = (getattr(message.chat, "username", "") or "").lower()
         if self._trade_mode and self._trade_queue is not None:
-            # во время трейда копим только сообщения игрового бота карточек
+            # Гонка: _click_and_wait/_send_and_wait успевает зарегистрировать future в
+            # _pending ДО того, как enter_trade_mode() выставит _trade_mode=True, но
+            # реальный ответ бота на этот клик приходит уже ПОСЛЕ — раньше он безусловно
+            # улетал в _trade_queue, farm.py._latest (predicate `lambda m: True`)
+            # принимал чужой ответ за трейд-панель, а настоящий ожидающий в _pending
+            # тихо доживал до таймаута (баг: «трейд показывает мои телефоны», ответ
+            # обслуживания фермы просачивался в трейд). Поэтому уже
+            # зарегистрированное до нас ожидание в очереди FIFO — в приоритете, и
+            # только когда для этого бота такого ожидания нет, сообщение уходит в
+            # трейд. enter_trade_mode() дополнительно ждёт освобождения лока бота
+            # перед стартом — см. там же — так что на практике очередь тут почти
+            # всегда уже пуста, это подстраховка на самый край гонки.
+            if self._resolve_pending(uname, message):
+                return
             if uname == CARDS_BOT.lower():
                 await self._trade_queue.put(message)
             return
@@ -286,13 +310,7 @@ class _WorkerBase:
         # тот уходил в таймаут, как будто бот не ответил (внешне выглядело так, будто
         # именно «Ткарточка» не работает, хотя дело было в конкуренции с параллельным
         # циклом). Поэтому ожидающие — очередь FIFO: раздаём ответы по порядку регистрации.
-        queue = self._pending.get(uname)
-        if queue:
-            fut = queue.pop(0)
-            if not queue:
-                self._pending.pop(uname, None)
-            if not fut.done():
-                fut.set_result(message)
+        self._resolve_pending(uname, message)
 
     async def _on_incoming_private(self, _client, message) -> None:
         """«📩 Акк»: новое личное сообщение от человека (не бота) — сохраняем в
@@ -501,7 +519,18 @@ class _WorkerBase:
         return clicked, None
 
     # ---------- примитивы режима трейда (использует farm.py / trade.py) ----------
-    def enter_trade_mode(self) -> None:
+    async def enter_trade_mode(self) -> None:
+        # Ждём (не держим) лок бота карточек — если ПРЯМО СЕЙЧАС какой-то другой
+        # цикл (ферма/магазин/ремонт/пкоины) внутри _click_and_wait/_send_and_wait
+        # держит этот лок в ожидании ответа, дожидаемся его завершения (ответ
+        # придёт или будет таймаут) ПЕРЕД тем, как включить трейд-режим — иначе
+        # именно этот в процессе ответ рискует уйти в _trade_queue вместо своего
+        # настоящего адресата (см. _on_message и _resolve_pending). После входа в
+        # трейд-режим циклы сами не начинают новых ожиданий (проверяют
+        # _trade_mode перед вызовом), так что после этой точки новых конкурентов
+        # за лок появляться не должно.
+        async with self._lock_for_bot(CARDS_BOT):
+            pass
         self._trade_queue = asyncio.Queue()
         self._trade_mode = True
 

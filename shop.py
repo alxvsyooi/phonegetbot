@@ -194,6 +194,10 @@ class ShopModule:
         её поисках, не дальше max_pages, чтобы не зациклиться, если модели нет вовсе."""
         next_btn_label = cfg.get("next_page_button", "➡")
         for _ in range(max_pages):
+            if self._trade_mode:
+                # трейд стартовал посреди пролистывания страниц — не долбим дальше
+                # в того же бота, см. automation.py._on_message
+                return None, listing
             candidates = [t for t in _all_buttons(listing) if _MODEL_BUTTON_RE.match(t.strip())]
             if not model_pref:
                 if candidates:
