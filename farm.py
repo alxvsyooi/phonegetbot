@@ -1283,14 +1283,29 @@ class FarmModule:
                     msg = refreshed
         return "; ".join(results)
 
+    _ALERT_DEDUP_DIGITS_RE = re.compile(r"\d+")
+    _ALERT_DEDUP_WINDOW = 1800  # 30 мин — см. _alert_dedup в automation.py
+
     async def _send_owner_alert(self, text: str, markup=None, error_label: str = "алерт") -> None:
         """Общая точка отправки: owner_id/alerts_enabled/alert_fn guard + try/except
         с print-фоллбэком — вынесено из 4-х похожих _notify_* функций ниже. Текст/
         markup каждая функция строит по-своему (у капчи своя многоветочная логика +
-        кнопки выбора категории — не унифицируем силой, только общий "хвост" отправки)."""
+        кнопки выбора категории — не унифицируем силой, только общий "хвост" отправки).
+
+        Дедупликация по error_label: если КАЖДЫЙ цикл (напр. repair.py/shop.py раз
+        в check_interval) падает на одной и той же непроходящей проблеме, текст
+        отличается только временем/цифрами (clock(), число ТОчек и т.п.) — сравниваем
+        текст БЕЗ цифр и не шлём новый алерт чаще, чем раз в _ALERT_DEDUP_WINDOW,
+        пока причина не изменится (тогда шлём сразу, не дожидаясь окна)."""
         owner_id = self.account.get("owner_id")
         if not owner_id or not self.account.get("alerts_enabled", True) or not self.alert_fn:
             return
+        now = time.time()
+        normalized = self._ALERT_DEDUP_DIGITS_RE.sub("", text)
+        prev = self._alert_dedup.get(error_label)
+        if prev and prev[0] == normalized and now - prev[1] < self._ALERT_DEDUP_WINDOW:
+            return
+        self._alert_dedup[error_label] = (normalized, now)
         try:
             await self.alert_fn(owner_id, text, markup)
         except Exception as e:  # noqa: BLE001

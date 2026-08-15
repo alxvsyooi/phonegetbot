@@ -91,6 +91,11 @@ class _WorkerBase:
         self._task_next: dict[int, float] = {}   # tid -> время следующего запуска
         self._container_alert_sent = False       # чтобы не слать «ресток скоро» повторно на один и тот же ресток
         self._dead_session_alerted = False        # см. _handle_dead_session — один алерт, не спам на каждый цикл
+        self._alert_dedup: dict[str, tuple[str, float]] = {}  # error_label -> (нормализ. текст, когда отправлен)
+                                                   # — см. _send_owner_alert в farm.py: одна и та же непроходящая
+                                                   # проблема (напр. ремонт/магазин не могут выполниться каждый
+                                                   # цикл по одной и той же причине) не должна слать новый алерт
+                                                   # КАЖДЫЙ проход цикла
 
         now = 0.0
         self.card_next_ts = now
