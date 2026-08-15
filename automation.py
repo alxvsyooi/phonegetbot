@@ -523,6 +523,10 @@ class _WorkerBase:
                 await asyncio.sleep(retry_delay)
         return clicked, None
 
+    async def _await_bot_lock(self, username: str) -> None:
+        async with self._lock_for_bot(username):
+            pass
+
     # ---------- примитивы режима трейда (использует farm.py / trade.py) ----------
     async def enter_trade_mode(self) -> None:
         # Ждём (не держим) лок бота карточек — если ПРЯМО СЕЙЧАС какой-то другой
@@ -533,9 +537,15 @@ class _WorkerBase:
         # настоящего адресата (см. _on_message и _resolve_pending). После входа в
         # трейд-режим циклы сами не начинают новых ожиданий (проверяют
         # _trade_mode перед вызовом), так что после этой точки новых конкурентов
-        # за лок появляться не должно.
-        async with self._lock_for_bot(CARDS_BOT):
-            pass
+        # за лок появляться не должно. Ограничено таймаутом — лок и так всегда
+        # освобождается сам за секунды (все держатели лока — send/click_and_wait
+        # с собственным timeout), но лучше один раз войти в трейд без идеальной
+        # синхронизации, чем повиснуть тут навсегда при непредвиденном баге.
+        try:
+            await asyncio.wait_for(self._await_bot_lock(CARDS_BOT), timeout=30)
+        except asyncio.TimeoutError:
+            print(f"[{self.name}] enter_trade_mode: лок бота карточек не освободился за 30с — "
+                  f"входим в трейд-режим без ожидания")
         self._trade_queue = asyncio.Queue()
         self._trade_mode = True
 
