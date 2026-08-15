@@ -317,17 +317,28 @@ class _TradeCore:
         participants = self._trade_participants()
         if any(p._trade_mode for p in participants):
             return "трейд уже выполняется"
-        for p in participants:
-            await p.enter_trade_mode()
-        self.farm.last_exchange = f"🔄 {self._start_text()}"
+        # entered — ТОЛЬКО те, для кого enter_trade_mode() реально успел вернуться.
+        # enter_trade_mode() теперь ждёт лок бота (см. automation.py) — то есть
+        # содержит await и может быть прервана (отмена таска, ошибка) ПОСРЕДИ цикла
+        # по нескольким участникам (TradeSession: farm + main). Раньше этот цикл
+        # был вне try/finally — если бы прервался НА ВТОРОМ участнике, у ПЕРВОГО
+        # (уже вошедшего) _trade_mode оставался бы True НАВСЕГДА: exit_trade_mode()
+        # ниже до него не добрался бы. Наблюдалось вживую как «карточка готова,
+        # но ничего не отправляется» — вся автоматизация аккаунта считала, что
+        # трейд идёт, и бесконечно пропускала циклы.
+        entered: list = []
         try:
+            for p in participants:
+                await p.enter_trade_mode()
+                entered.append(p)
+            self.farm.last_exchange = f"🔄 {self._start_text()}"
             result = await asyncio.wait_for(self._run(), timeout=self._overall_timeout())
         except asyncio.TimeoutError:
             result = f"таймаут на: {self._last_step}"
         except Exception as e:  # noqa: BLE001
             result = f"ошибка на «{self._last_step}»: {e}"
         finally:
-            for p in participants:
+            for p in entered:
                 p.exit_trade_mode()
         self.farm.last_exchange = f"🔄 {result} ({time.strftime('%H:%M:%S')})"
         self._log(result)
