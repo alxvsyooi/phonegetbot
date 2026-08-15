@@ -154,11 +154,13 @@ class ControlBot:
         async def _start(_c, m: Message):
             uid = m.from_user.id
             self.states.pop(uid, None)
-            if not self._my_accounts(uid):
-                # первый заход — закрепляем снизу постоянную кнопку «/start» отдельным
-                # сообщением (сообщение может нести только ОДИН тип клавиатуры — reply
-                # или inline, не оба сразу); дальше держится и без повтора
-                await m.reply("👋", reply_markup=_START_KEYBOARD)
+            # закрепляем снизу постоянную кнопку «/start» отдельным сообщением
+            # (сообщение может нести только ОДИН тип клавиатуры — reply или inline,
+            # не оба сразу) — раньше слалось только новым пользователям без
+            # аккаунтов; если клавиатура пропадала у уже настроенного пользователя
+            # (клиент Telegram, переустановка и т.п.), восстановить её было нечем —
+            # шлём на КАЖДЫЙ /start, не только первый
+            await m.reply("👋", reply_markup=_START_KEYBOARD)
             # приветственный экран NEXUSCARDS — на каждый /start (и для новых, и для
             # уже настроенных аккаунтов); переход к Dashboard — через «🚀 Начать работу»
             await m.reply_photo(_LOGO_PATH, caption=_WELCOME_TEXT, reply_markup=_WELCOME_KEYBOARD)
