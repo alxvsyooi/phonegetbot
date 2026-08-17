@@ -38,7 +38,7 @@ import time
 from typing import Any
 
 from storage import CARDS_BOT
-from common import clock, today_msk, in_time_window, TBILISI
+from common import clock, today_msk, in_time_window, TBILISI, fmt_duration
 from common import msg_text as _msg_text
 from common import backoff_seconds as _backoff_seconds
 from common import all_buttons as _all_buttons
@@ -57,6 +57,31 @@ _MODEL_COUNT_RE = re.compile(r"\(\s*x?\s*(\d+)\s*\)\s*$", re.IGNORECASE)
 # «1. ⭐ Мастерская «Х» / Владелец: @username / ...» в общем списке чужих мастерских —
 # нежадный захват ДО следующего пункта списка, чтобы не съесть сразу несколько карточек
 _WORKSHOP_OWNER_RE = re.compile(r"(\d+)\.[\s\S]*?владелец\s*:?\s*@(\S+)", re.IGNORECASE)
+# «Ремонтирует: ... (осталось 47 мин.)» — на экране конкретного занятого
+# инструмента (после клика в него из «Оборудование мастерской»)
+_TOOL_REMAINING_RE = re.compile(r"осталось\s*(\d+)\s*мин", re.IGNORECASE)
+
+# поломка (ищем подстрокой в тексте кнопки поломки, без учёта регистра) ->
+# (подстрока имени нужного инструмента, базовое время в минутах на полностью
+# прокачанной мастерской). Разные поломки требуют РАЗНОГО инструмента — не
+# общая очередь (подтверждено владельцем вживую). Время используется только
+# как fallback-оценка, если с экрана занятого инструмента не удалось
+# распарсить реальное «осталось N мин.» — в норме берём число с экрана.
+_BREAKAGE_TOOL_INFO: list[tuple[str, str, int]] = [
+    ("вздут", "термоковрик", 10),
+    ("экран", "сепаратор", 15),
+    ("память", "нижний подогрев", 120),
+    ("материнск", "микроскоп", 240),
+    ("чип", "паяльная станция", 60),
+]
+
+
+def _tool_info_for_breakage(breakage_label: str) -> tuple[str, int] | None:
+    low = breakage_label.lower()
+    for needle, tool_substr, minutes in _BREAKAGE_TOOL_INFO:
+        if needle in low:
+            return tool_substr, minutes
+    return None
 
 
 def _first_nonempty_category(message) -> str | None:
@@ -412,7 +437,11 @@ class RepairModule:
                         error_label="алерт о мастерской",
                     )
                 interval = max(60, int(self.repair_cfg.get("check_interval", 300)))
-                self.repair_next_ts = time.time() + interval
+                # _repair_this_phone мог сам поставить repair_next_ts дальше в будущее
+                # (см. _estimate_own_tool_wait — инструмент освободится позже, чем через
+                # обычный check_interval) — не затираем это более точное время дефолтным
+                # интервалом, берём максимум из двух
+                self.repair_next_ts = max(self.repair_next_ts, time.time() + interval)
                 await self._publish_status(repair_next_ts=self.repair_next_ts, last_repair=self.last_repair)
             except asyncio.CancelledError:
                 raise
@@ -497,6 +526,68 @@ class RepairModule:
             self.last_repair = f"ошибка: {e}"
             return self.last_repair
 
+    async def _estimate_own_tool_wait(self, breakage_label: str, bot: str, cfg: dict) -> float | None:
+        """Когда своего свободного инструмента под конкретную поломку прямо
+        сейчас нет — вместо немедленной сдачи в чужую мастерскую/ошибки смотрим
+        «Моя мастерская -> Оборудование», сколько реально осталось у занятых
+        инструментов НУЖНОГО типа (breakage_label -> тип инструмента, см.
+        _BREAKAGE_TOOL_INFO — владелец сообщил соответствие поломка/инструмент/
+        базовое время вживую), и возвращаем МИНИМАЛЬНОЕ оставшееся время в
+        секундах — чтобы следующая проверка automation пришлась ровно на момент
+        освобождения, а не долбила каждый check_interval или сразу сдавалась.
+
+        Список оборудования («✅ Сепаратор №1»/«⏳ Бинокулярный микроскоп №1»)
+        сам по себе времени не показывает — только статус свободен/занят;
+        точное «осталось N мин.» видно только на экране КОНКРЕТНОГО занятого
+        инструмента после клика в него (проверено вживую). Раз инструментов
+        обычно немного (максимум 10 на мастерскую), кликаем по каждому занятому
+        совпадающему по типу — не так уж дорого.
+
+        None — тип инструмента для этой поломки не задан в таблице, или в
+        мастерской его вообще нет (нечего ждать), или экран не ответил
+        (падаем на старое поведение — чужая мастерская/ошибка)."""
+        info = _tool_info_for_breakage(breakage_label)
+        if info is None:
+            return None
+        tool_substr, base_minutes = info
+        workshop_cmd = cfg.get("workshop_command") or "Моя мастерская"
+        panel = await self._send_and_wait(bot, workshop_cmd, timeout=15)
+        if panel is None:
+            return None
+        eq_btn = _find_button(panel, cfg.get("equipment_button", "оборудование"))
+        if not eq_btn:
+            return None
+        clicked, eq = await self._click_retry(panel, eq_btn, bot, cfg)
+        if not clicked or eq is None:
+            return None
+
+        candidates = [t for t in _all_buttons(eq) if tool_substr in t.lower()]
+        if not candidates:
+            return None  # такого инструмента в мастерской вообще нет
+
+        back_labels = ("назад", "вернуться")
+        min_wait: float | None = None
+        for btn in candidates:
+            if self._trade_mode:  # трейд стартовал посреди перебора — см. automation.py._on_message
+                break
+            if "✅" in btn:
+                # нашёлся свободный — странно, что не подхватился раньше
+                # (own_btn-флоу выше), но ждать в этом случае точно не нужно
+                return 0.0
+            clicked, detail = await self._click_retry(eq, btn, bot, cfg)
+            if not clicked or detail is None:
+                continue
+            m = _TOOL_REMAINING_RE.search(_msg_text(detail))
+            wait = float(m.group(1)) * 60 if m else float(base_minutes * 60)
+            if min_wait is None or wait < min_wait:
+                min_wait = wait
+            back_btn = next((b for b in _all_buttons(detail) if any(s in b.lower() for s in back_labels)), None)
+            if back_btn:
+                clicked, back_msg = await self._click_retry(detail, back_btn, bot, cfg)
+                if clicked and back_msg is not None:
+                    eq = back_msg
+        return min_wait
+
     async def _repair_this_phone(self, bot: str, phone_card, cfg: dict) -> str:
         text = _msg_text(phone_card)
         model_m = _MODEL_RE.search(text)
@@ -530,6 +621,17 @@ class RepairModule:
                     self._bump("repaired")
                     await self._repair_all_equipment()
                     return f"🛠 в ремонте: «{model_name}» / {breakage_btn} ({clock()} {today_msk()})"
+
+        # своего свободного инструмента нет прямо сейчас — раньше здесь сразу
+        # либо шли в чужую мастерскую, либо сдавались с ошибкой каждый цикл.
+        # Свой инструмент бесплатнее и приоритетнее чужого — если он скоро
+        # освободится, планируем следующую проверку РОВНО на этот момент вместо
+        # спама ошибками/платы за чужую мастерскую (см. _estimate_own_tool_wait).
+        own_wait = await self._estimate_own_tool_wait(breakage_btn, bot, cfg)
+        if own_wait is not None and own_wait > 0:
+            self.repair_next_ts = time.time() + own_wait + 30
+            return (f"⏳ «{model_name}»/«{breakage_btn}»: свой инструмент занят, "
+                    f"освободится через {fmt_duration(int(own_wait))} — попробуем снова тогда ({clock()})")
 
         # своего свободного инструмента нет — по умолчанию чужую мастерскую не
         # арендуем (см. docstring модуля); включается тумблером
