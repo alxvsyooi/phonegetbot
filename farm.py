@@ -2311,19 +2311,25 @@ class FarmModule:
             phone_btn, page_msg = await self._find_phone_button_across_pages(bot, cat_msg, model_name, cfg)
             if not phone_btn:
                 continue
-            installed = await self._click_step(bot, page_msg, phone_btn, cfg, timeout=15)
-            if installed is None:
+            # Игра переспрашивает подтверждение кнопкой "Вставить в слот" (реже
+            # "Подтвердить") — но не всегда СРАЗУ в ответ на выбор телефона:
+            # первым может прийти промежуточное сообщение (тот же паттерн, что
+            # и в _execute_pay/shop.py._buy_selected). Раньше брали только
+            # ПЕРВЫЙ ответ на клик по телефону одним _click_step и, не найдя на
+            # НЁМ кнопки подтверждения, молча считали слот заполненным — на деле
+            # диалог подтверждения так и оставался ненажатым, а функция врала
+            # про успех (репорт владельца: телефон выбран, слот всё равно
+            # пустует). _click_and_wait_for_button терпеливо ждёт ещё несколько
+            # сообщений, если нужной кнопки нет в первом же ответе.
+            clicked_confirm, done = await self._click_and_wait_for_button(
+                page_msg, phone_btn, bot, "вставить в слот", timeout=15)
+            if done is None:
                 return False
-            # игра переспрашивает подтверждение кнопкой "Вставить в слот" (не
-            # "Подтвердить") - без этого клика телефон так и остаётся не
-            # установленным, а функция раньше молча считала это успехом
-            confirm_btn = (
-                _find_button(installed, "вставить в слот")
-                or _find_button(installed, "подтвердить")
-            )
-            if confirm_btn:
-                await self._click_step(bot, installed, confirm_btn, cfg, timeout=15)
-            return True
+            if not clicked_confirm:
+                alt_btn = _find_button(done, "подтвердить")
+                if alt_btn:
+                    clicked_confirm = await self._try_click(done, alt_btn)
+            return clicked_confirm
         # рабочего экземпляра этой модели пока нет (ремонт не завершён) — либо
         # он ЕСТЬ, но не нашёлся (напр. дальше max_pages страниц одной редкости);
         # логируем, какие редкости вообще проверили, чтобы отличить одно от другого
@@ -2333,45 +2339,67 @@ class FarmModule:
         return False
 
     async def _execute_pay(self, target: str, amount: int, timeout: int = 15) -> str:
-        """Отправляет «/pay target amount» и доводит перевод до конца.
+        """Отправляет «/pay target amount» и доводит перевод до конца, ПЕРЕПРОВЕРЯЯ
+        результат по факту (реальному изменению баланса), а не только по тексту
+        ответа/успеху клика — репорт владельца: «слив твинкам через раз» (то есть
+        не гонка между несколькими твинками — они переводятся строго по очереди
+        под одним и тем же локом ниже, — а именно ненадёжное распознавание
+        результата у самого /pay).
 
-        Проверено вживую на «слив твинкам»: игра НЕ всегда подтверждает перевод
-        одним сообщением сразу («Вы успешно перевели...») — иногда первым
-        сообщением приходит что-то промежуточное (напр. повторный «такк»/профиль),
-        и только СЛЕДУЮЩИМ — настоящий диалог «Вы уверены, что хотите передать...»
-        с кнопкой «Подтвердить». Старый код брал только первое сообщение после
-        /pay и, не найдя на нём кнопки, сдавался — деньги списывались с исходного
-        аккаунта (промежуточным сообщением), а сам перевод так и зависал
-        неподтверждённым диалогом в чате, который никто не нажимал. Поэтому здесь
-        ждём НЕСКОЛЬКО сообщений подряд (под одним и тем же локом бота, чтобы
-        параллельный цикл не перехватил кнопку подтверждения), пока не найдём
-        либо готовый успех, либо саму кнопку."""
+        Игра НЕ всегда подтверждает перевод одним сообщением сразу («Вы успешно
+        перевели...») — иногда первым сообщением приходит что-то промежуточное
+        (напр. повторный «такк»/профиль), и только СЛЕДУЮЩИМ — настоящий диалог
+        «Вы уверены, что хотите передать...» с кнопкой «Подтвердить», поэтому
+        ждём НЕСКОЛЬКО сообщений подряд, а не сдаёмся после первого же.
+
+        Но даже так текст/клик — ненадёжный сигнал (клик мог реально пройти, а
+        ответ на него потеряться при отправке очередного твинка сразу следом, и
+        наоборот). Точность важнее скорости: если после нескольких сообщений
+        подряд явного «успешно перевели» текстом не увидели, перепроверяем
+        баланс ДО и ПОСЛЕ — реальное списание ровно ту же сумму считаем
+        окончательным подтверждением независимо от того, что показал текст."""
         if not self.client or not self.running:
             return "аккаунт не запущен"
+        pre = await self._send_and_wait(CARDS_BOT, BALANCE_WORD, timeout=15)
+        balance_before = parse_points(_msg_text(pre))
+
+        confirmed_by_text = False
         async with self._lock_for_bot(CARDS_BOT):
             try:
                 await self.client.send_message(CARDS_BOT, f"/pay {target} {amount}")
             except Exception as e:  # noqa: BLE001
                 return f"ошибка отправки /pay: {e}"
-            for _ in range(3):
+            for _ in range(4):
                 fut = self._register_wait(CARDS_BOT)
                 try:
                     msg = await asyncio.wait_for(fut, timeout)
                 except asyncio.TimeoutError:
                     self._forget_wait(CARDS_BOT, fut)
-                    return "⚠️ нет ответа на /pay"
+                    break
                 text = (_msg_text(msg) or "").lower()
                 if "успешно перевел" in text:
-                    self._bump("paid", amount)
-                    return f"✅ переведено {amount} -> {target} ({clock()} {today_msk()})"
+                    confirmed_by_text = True
+                    break
                 if _find_button(msg, PAY_CONFIRM_BUTTON):
-                    if await self._try_click(msg, PAY_CONFIRM_BUTTON):
-                        self._bump("paid", amount)
-                        return f"✅ переведено {amount} -> {target} ({clock()} {today_msk()})"
-                    return "⚠️ не удалось нажать «Подтвердить»"
-                # что-то промежуточное (не успех и не диалог подтверждения) — ждём
-                # ещё одно сообщение от бота, не сдаёмся после первого же
-            return "⚠️ не дождался подтверждения /pay за несколько сообщений подряд"
+                    await self._try_click(msg, PAY_CONFIRM_BUTTON)
+                    # не доверяем булевому результату клика — ниже всё равно
+                    # перепроверим по балансу; продолжаем ждать следующий ответ,
+                    # успех может прийти отдельным сообщением
+                    continue
+                # что-то промежуточное — ждём ещё одно сообщение от бота
+
+        if confirmed_by_text:
+            self._bump("paid", amount)
+            return f"✅ переведено {amount} -> {target} ({clock()} {today_msk()})"
+
+        if balance_before is not None:
+            await asyncio.sleep(2)
+            post = await self._send_and_wait(CARDS_BOT, BALANCE_WORD, timeout=15)
+            balance_after = parse_points(_msg_text(post))
+            if balance_after is not None and balance_before - balance_after >= amount:
+                self._bump("paid", amount)
+                return f"✅ переведено {amount} -> {target} (подтверждено по балансу, {clock()} {today_msk()})"
+        return "⚠️ /pay не подтвердился ни текстом, ни изменением баланса"
 
     async def _payout(self) -> None:
         """«такк» -> «Точки: N» -> /pay <получатель> N*процент -> Подтвердить.

@@ -411,6 +411,7 @@ class ControlBot:
         if self._my_accounts(uid):
             rows.append([_btn("☎️ Показать все номера", "allphones")])
             rows.append([_btn("⏱ Интервалы для всех", "bulkintervals")])
+            rows.append([_btn("🔧 Обслужить фермы у всех", "bulkfarmmaint")])
         rows.append([_btn("⬅️ Назад", "home")])
         return InlineKeyboardMarkup(rows)
 
@@ -840,14 +841,12 @@ class ControlBot:
         )
 
     def _actions_menu(self, acc: dict) -> InlineKeyboardMarkup:
-        """Верхний уровень «▶️ Действия» — навигация по группам, 2 колонки.
-        ▶️ — открывает подменю группы, ⚡️ — сразу выполняет (см. actall:)."""
+        """Верхний уровень «▶️ Действия» — навигация по группам, 2 колонки."""
         aid = acc["id"]
         return InlineKeyboardMarkup([
             [_btn("▶️ 🎮 Игра", f"actgame:{aid}"), _btn("▶️ 🔧 Ферма", f"actfarm:{aid}")],
             [_btn("▶️ 🛠 Мастерская", f"actrepair:{aid}"), _btn("▶️ 🏪 Магазин", f"actshop:{aid}")],
             [_btn("▶️ 💰 Финансы", f"actfin:{aid}")],
-            [_btn("⚡️ Запустить всё", f"actall:{aid}")],
             [_btn("⬅️ Назад к аккаунту", f"farm:{aid}")],
         ])
 
@@ -1098,6 +1097,16 @@ class ControlBot:
                     prompt = f"{self._BULK_SET_PROMPTS.get(field, 'Новое значение')} (в минутах, >=1)"
                 await q.message.edit_text(f"{prompt} — применится сразу ко <b>всем {n} аккаунтам</b>:")
                 return await q.answer()
+            if data == "bulkfarmmaint":
+                accs = self._my_accounts(uid)
+                if not accs:
+                    return await q.answer("Нет аккаунтов", show_alert=True)
+                running = [a for a in accs if (w := self.manager.workers.get(a["id"])) and w.running]
+                if not running:
+                    return await q.answer("Ни один аккаунт не запущен", show_alert=True)
+                await q.answer(f"⏳ Обслуживаю фермы у {len(running)} аккаунт(ов) по очереди (это надолго)...")
+                asyncio.create_task(self._run_bulk_farm_maint(q, uid, running))
+                return
 
             # дальше всё про конкретный аккаунт — проверяем владение
             aid = int(data.split(":")[1])
@@ -1152,8 +1161,6 @@ class ControlBot:
                 await q.message.edit_text(self._intervals_text(acc), reply_markup=self._intervals_menu(acc))
             elif data.startswith("actions:"):
                 await q.message.edit_text(self._actions_text(acc), reply_markup=self._actions_menu(acc))
-            elif data.startswith("actall:"):
-                await self._start_run_all(q, aid)
             elif data.startswith("actgame:"):
                 await q.message.edit_text(f"🎮 Игра — <b>{acc.get('name')}</b>\n───",
                                           reply_markup=self._act_game_menu(acc))
@@ -1644,11 +1651,16 @@ class ControlBot:
 
     async def _run_drain(self, q: CallbackQuery, aid: int, w, twinks: list[dict], amount: int) -> None:
         results = []
-        for t in twinks:
+        for i, t in enumerate(twinks):
             ident = self._twink_ident(t)
             if not ident:
                 results.append(f"• {t.get('name')}: ⚠️ нет username/id, пропущен")
                 continue
+            if i > 0:
+                # твинки строго по очереди, с паузой между — не гонимся за
+                # скоростью, каждый перевод и так самопроверяется по балансу
+                # внутри _execute_pay (см. farm.py)
+                await asyncio.sleep(2)
             res = await w.manual_pay(ident, amount)
             results.append(f"• {t.get('name')}: {res}")
         acc = self.storage.get(aid)
@@ -1691,6 +1703,27 @@ class ControlBot:
         text = self._account_text(acc) + "\n\n📥 <b>Собрано с твинков:</b>\n" + "\n".join(results)
         await self._safe_edit(q, text, self._account_menu(acc))
 
+    async def _run_bulk_farm_maint(self, q: CallbackQuery, uid: int, accs: list[dict]) -> None:
+        """«🔧 Обслужить фермы у всех» — строго по очереди, один аккаунт за раз
+        (не параллельно): каждый вызов farm_maintenance_now() сам по себе уже
+        держит фермой лок и выключает/включает её на время установки — гнать
+        несколько аккаунтов разом тут не нужно, они и так независимы по сессиям,
+        но последовательный проход проще читать в результатах и не создаёт
+        одновременный всплеск активности сразу у всех аккаунтов."""
+        results = []
+        for i, a in enumerate(accs):
+            w = self.manager.workers.get(a["id"])
+            if not w or not w.running:
+                results.append(f"• {a.get('name')}: аккаунт не запущен, пропущен")
+                continue
+            if i > 0:
+                await asyncio.sleep(2)
+            res = await w.farm_maintenance_now()
+            results.append(f"• {a.get('name')}: {res}")
+        text = ("🔧 <b>Обслуживание фермы — все аккаунты</b>\n───\n"
+                + "\n".join(results))
+        await self._safe_edit(q, text, self._accounts_menu(uid))
+
     async def _start_repair_now(self, q: CallbackQuery, aid: int) -> None:
         w = self.manager.workers.get(aid)
         if not w or not w.running:
@@ -1715,51 +1748,6 @@ class ControlBot:
         acc = self.storage.get(aid)
         await self._safe_edit(q, f"🛠 Мастерская — <b>{acc.get('name')}</b>\n───\n🔩 {result}",
                               self._act_repair_menu(acc))
-
-    async def _start_run_all(self, q: CallbackQuery, aid: int) -> None:
-        w = self.manager.workers.get(aid)
-        if not w or not w.running:
-            return await q.answer("Аккаунт не запущен", show_alert=True)
-        await q.answer("⚡️ Запускаю полный цикл...")
-        asyncio.create_task(self._run_all_now(q, aid, w))
-
-    async def _run_all_now(self, q: CallbackQuery, aid: int, w) -> None:
-        """«Запустить всё» — прогоняет по очереди все безопасные (без ручного ввода
-        получателя/суммы) команды «...сейчас» из всех разделов. Намеренно НЕ трогает
-        Финансы (перевод человеку/трейд/слив телефонов — нужен получатель; вывод всего/
-        слив твинкам — реально перемещают деньги) — это одноразовые действия с явным
-        подтверждением, а не часть автоматического цикла фарма."""
-        acc = self.storage.get(aid)
-        results: list[str] = []
-
-        async def step(label: str, coro) -> None:
-            try:
-                res = await coro
-            except Exception as e:  # noqa: BLE001
-                res = f"ошибка: {e}"
-            results.append(f"{label}: {res}")
-
-        await w.collect_mining()
-        results.append(f"⛏ Майнинг: {w.last_mining}")
-        await step("🔧 Обслуживание фермы", w.farm_maintenance_now())
-        await step("🧩 Заполнить ферму", w.fill_farm_now())
-        await step("⚡ Перегрузка питания", w.relieve_overload_now())
-        if acc.get("pcoin_exchange_enabled", False):
-            await step("💱 P-Coins → ТОчки", w.dump_pcoins_now())
-        if acc.get("pcoin_send_enabled", False):
-            await step("💱 P-Coins получателю", w.send_pcoins_now())
-        await step("🛠 Нерабочие телефоны", w.repair_now())
-        await step("🔩 Оборудование", w.repair_equipment_now())
-        await step("🏪 Магазин телефонов", w.buy_phones_now())
-        if acc.get("containers_api_enabled", False):
-            await step("📦⚡ Контейнеры", w.buy_containers_api_now())
-
-        acc = self.storage.get(aid)  # могло измениться (напр. name) за время выполнения
-        summary = "\n".join(f"• {r}" for r in results)
-        await self._safe_edit(
-            q, f"⚡️ <b>Запустить всё</b> — {acc.get('name')}\n───\n{summary}",
-            self._actions_menu(acc),
-        )
 
     async def _start_farm_maintenance_now(self, q: CallbackQuery, aid: int) -> None:
         w = self.manager.workers.get(aid)
