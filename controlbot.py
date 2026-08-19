@@ -1400,8 +1400,6 @@ class ControlBot:
                 await q.message.edit_text(
                     "📜 Минимальный баланс «Такк» (ТОчки), при котором «Выполнить достижения» вообще "
                     "запускается (число, по умолчанию 150000):")
-            elif data.startswith("upgradeacc:"):
-                await self._start_upgrade_account(q, aid)
             elif data.startswith("pcoincheck:"):
                 await self._start_dump_pcoins(q, aid)
             elif data.startswith("pcoinsendnow:"):
@@ -1845,18 +1843,6 @@ class ControlBot:
         acc = self.storage.get(aid)
         await self._safe_edit(q, self._account_text(acc) + f"\n\n📦 {result}",
                               self._autom_containers_menu(acc))
-
-    async def _start_upgrade_account(self, q: CallbackQuery, aid: int) -> None:
-        w = self.manager.workers.get(aid)
-        if not w or not w.running:
-            return await q.answer("Аккаунт не запущен", show_alert=True)
-        await q.answer("⏳ Прокачиваю аккаунт (магазин улучшений)...")
-        asyncio.create_task(self._run_upgrade_account(q, aid, w))
-
-    async def _run_upgrade_account(self, q: CallbackQuery, aid: int, w) -> None:
-        result = await w.upgrade_account()
-        acc = self.storage.get(aid)
-        await self._safe_edit(q, self._account_text(acc) + f"\n\n💰 {result}", self._act_fin_menu(acc))
 
     async def _run_broadcast(self, q: CallbackQuery, uid: int, text: str) -> None:
         owners = {a.get("owner_id") for a in self.storage.accounts if a.get("owner_id")}

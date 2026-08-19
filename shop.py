@@ -129,7 +129,13 @@ class ShopModule:
 
     async def _buy_phones_now_impl(self) -> str:
         """Открыть магазин телефонов, выбрать настроенную редкость/модель и купить.
-        Используется циклом и кнопкой «🏪 Купить телефоны сейчас»."""
+        Используется циклом и кнопкой «🏪 Купить телефоны сейчас».
+
+        Весь флоу навигации+покупки (открыть магазин -> редкость -> модель ->
+        количество -> подтвердить) — ПОД ОДНИМ непрерывным локом бота (см.
+        farm.py.dump_pcoins_now): без этого параллельный цикл того же аккаунта
+        (карточки/майнинг/ремонт/etc.) мог встрять своим сообщением посреди
+        навигации по магазину."""
         if not self.client or not self.running:
             self.last_shop = "аккаунт не запущен"
             return self.last_shop
@@ -145,42 +151,44 @@ class ShopModule:
 
         try:
             # баланс — ДО входа в магазин, одним текстовым сообщением, никак не
-            # перемешиваясь с последующей навигацией по инлайн-кнопкам (см. докстринг)
+            # перемешиваясь с последующей навигацией по инлайн-кнопкам (см. докстринг),
+            # и до захвата непрерывного лока ниже — сам по себе однократный round trip
             balance = await self._check_balance()
 
-            entry = await self._send_and_wait(bot, open_cmd, timeout=20)
-            if entry is None:
-                self.last_shop = f"⚠️ нет ответа на «{open_cmd}» ({clock()})"
-                return self.last_shop
+            async with self._lock_for_bot(bot):
+                entry = await self._send_locked(bot, open_cmd, timeout=20)
+                if entry is None:
+                    self.last_shop = f"⚠️ нет ответа на «{open_cmd}» ({clock()})"
+                    return self.last_shop
 
-            rarity_btn = _find_button(entry, rarity)
-            if not rarity_btn:
-                self.last_shop = f"⚠️ редкость «{rarity}» не найдена в магазине ({clock()})"
-                # диагностика живого репорта: редкость визуально ЕСТЬ при ручном заходе,
-                # но автозакупка её не находит — печатаем, что реально пришло в ответ на
-                # open_cmd (подозрение: словили чужое/непрошенное сообщение бота вместо
-                # экрана магазина — см. FIFO-корреляцию в automation.py._pending)
-                print(f"[{self.name}] shop: редкость «{rarity}» не найдена; текст ответа: "
-                      f"{_msg_text(entry)[:200]!r}; кнопки: {_all_buttons(entry)!r}")
-                return self.last_shop
-            clicked, listing = await self._click_retry(entry, rarity_btn, bot, cfg)
-            if not clicked or listing is None:
-                self.last_shop = f"⚠️ нет ответа при выборе редкости ({clock()})"
-                return self.last_shop
+                rarity_btn = _find_button(entry, rarity)
+                if not rarity_btn:
+                    self.last_shop = f"⚠️ редкость «{rarity}» не найдена в магазине ({clock()})"
+                    # диагностика живого репорта: редкость визуально ЕСТЬ при ручном заходе,
+                    # но автозакупка её не находит — печатаем, что реально пришло в ответ на
+                    # open_cmd (подозрение: словили чужое/непрошенное сообщение бота вместо
+                    # экрана магазина — см. FIFO-корреляцию в automation.py._pending)
+                    print(f"[{self.name}] shop: редкость «{rarity}» не найдена; текст ответа: "
+                          f"{_msg_text(entry)[:200]!r}; кнопки: {_all_buttons(entry)!r}")
+                    return self.last_shop
+                listing = await self._click_retry_locked(entry, rarity_btn, bot, cfg)
+                if listing is None:
+                    self.last_shop = f"⚠️ нет ответа при выборе редкости ({clock()})"
+                    return self.last_shop
 
-            model_btn, listing = await self._find_model(bot, listing, cfg, model_pref)
-            if not model_btn:
-                self.last_shop = f"⚠️ не нашёл модель в «{rarity}» ({clock()})"
-                print(f"[{self.name}] shop: модель не найдена (pref={model_pref!r}); "
-                      f"кнопки последней страницы: {_all_buttons(listing)!r}")
-                return self.last_shop
-            clicked, detail = await self._click_retry(listing, model_btn, bot, cfg)
-            if not clicked or detail is None:
-                self.last_shop = f"⚠️ нет ответа на выбор модели ({clock()})"
-                return self.last_shop
+                model_btn, listing = await self._find_model(bot, listing, cfg, model_pref)
+                if not model_btn:
+                    self.last_shop = f"⚠️ не нашёл модель в «{rarity}» ({clock()})"
+                    print(f"[{self.name}] shop: модель не найдена (pref={model_pref!r}); "
+                          f"кнопки последней страницы: {_all_buttons(listing)!r}")
+                    return self.last_shop
+                detail = await self._click_retry_locked(listing, model_btn, bot, cfg)
+                if detail is None:
+                    self.last_shop = f"⚠️ нет ответа на выбор модели ({clock()})"
+                    return self.last_shop
 
-            model_name = model_btn.rsplit("(", 1)[0].strip()
-            self.last_shop = await self._buy_selected(bot, detail, cfg, model_name, want_qty, balance)
+                model_name = model_btn.rsplit("(", 1)[0].strip()
+                self.last_shop = await self._buy_selected(bot, detail, cfg, model_name, want_qty, balance)
             return self.last_shop
         except asyncio.CancelledError:
             raise
@@ -191,7 +199,9 @@ class ShopModule:
     async def _find_model(self, bot: str, listing, cfg: dict, model_pref: str, max_pages: int = 12):
         """Без настройки phone_shop_model — первая модель в списке (как «по умолчанию»
         на скринах). С настройкой — пролистывает страницы (кнопка next_page_button) в
-        её поисках, не дальше max_pages, чтобы не зациклиться, если модели нет вовсе."""
+        её поисках, не дальше max_pages, чтобы не зациклиться, если модели нет вовсе.
+        Вызывается уже ПОД локом бота (см. _buy_phones_now_impl) — использует
+        locked-варианты кликов, без своего лока."""
         next_btn_label = cfg.get("next_page_button", "➡")
         for _ in range(max_pages):
             if self._trade_mode:
@@ -209,8 +219,8 @@ class ShopModule:
             nxt = _find_button(listing, next_btn_label)
             if not nxt:
                 break
-            clicked, nxt_listing = await self._click_retry(listing, nxt, bot, cfg)
-            if not clicked or nxt_listing is None:
+            nxt_listing = await self._click_retry_locked(listing, nxt, bot, cfg)
+            if nxt_listing is None:
                 break
             listing = nxt_listing
         return None, listing
@@ -218,6 +228,8 @@ class ShopModule:
     async def _buy_selected(
         self, bot: str, detail, cfg: dict, model_name: str, want_qty: int, balance: int | None,
     ) -> str:
+        """Вызывается уже ПОД локом бота (см. _buy_phones_now_impl) — locked-варианты,
+        без своего лока."""
         buy_btn = cfg.get("bulk_button", "купить оптом")
         confirm_btn = cfg.get("confirm_button", "подтвердить")
 
@@ -230,8 +242,8 @@ class ShopModule:
         if not btn:
             have = ", ".join(_all_buttons(detail)) or "нет кнопок"
             return f"⚠️ «{model_name}»: кнопка «{buy_btn}» не найдена (есть: {have}) ({clock()})"
-        clicked, qty_msg = await self._click_retry(detail, btn, bot, cfg)
-        if not clicked or qty_msg is None:
+        qty_msg = await self._click_retry_locked(detail, btn, bot, cfg)
+        if qty_msg is None:
             return f"⚠️ «{model_name}»: нет ответа на «{buy_btn}» ({clock()})"
 
         target = want_qty if want_qty > 0 else None
@@ -265,8 +277,8 @@ class ShopModule:
             return f"⚠️ «{model_name}»: не нашёл кнопку количества (есть: {have}) ({clock()})"
         # игра иногда шлёт промежуточное сообщение ДО настоящего диалога
         # подтверждения покупки (обнаружено вживую на /pay, см. farm.py._execute_pay) —
-        # _click_and_wait_for_button не сдаётся, если кнопки нет в первом же ответе
-        clicked_confirm, done = await self._click_and_wait_for_button(
+        # _click_and_wait_for_button_locked не сдаётся, если кнопки нет в первом же ответе
+        clicked_confirm, done = await self._click_and_wait_for_button_locked(
             qty_msg, qty_btn, bot, confirm_btn, timeout=15)
         if done is None:
             return f"⚠️ «{model_name}»: нет ответа на выбор количества ({clock()})"
@@ -316,7 +328,12 @@ class ShopModule:
         достижение — повторный флип на том же аккаунте бесполезен, но команда не
         проверяет это сама (решать владельцу). Флоу проверен вживую: /avito ->
         «Подать объявление» -> «Телефоны» -> редкость -> первый телефон -> цена
-        (текст) -> «Пропустить» описание -> «Подтвердить» (текст)."""
+        (текст) -> «Пропустить» описание -> «Подтвердить» (текст).
+
+        Весь флоу — ПОД ОДНИМ непрерывным локом бота (см. farm.py.dump_pcoins_now):
+        два отдельных текстовых ответа подряд (цена, потом подтверждение) —
+        без непрерывного лока параллельный цикл этого же аккаунта мог встрять
+        своим сообщением между ними и сбить диалог подачи объявления."""
         cfg = self.avito_cfg
         bot = cfg.get("bot") or CARDS_BOT
         open_cmd = cfg.get("open_command") or "/avito"
@@ -325,56 +342,57 @@ class ShopModule:
         skip_nav = ("назад", "вернуться")
 
         try:
-            entry = await self._send_and_wait(bot, open_cmd, timeout=15)
-            if entry is None:
-                return f"⚠️ нет ответа на «{open_cmd}» ({clock()})"
-            post_btn = _find_button(entry, cfg.get("post_button", "подать объявление"))
-            if not post_btn:
-                return f"⚠️ кнопка «подать объявление» не найдена ({clock()})"
-            clicked, type_msg = await self._click_and_wait(entry, post_btn, bot, timeout=15)
-            if not clicked or type_msg is None:
-                return f"⚠️ нет ответа на «подать объявление» ({clock()})"
+            async with self._lock_for_bot(bot):
+                entry = await self._send_locked(bot, open_cmd, timeout=15)
+                if entry is None:
+                    return f"⚠️ нет ответа на «{open_cmd}» ({clock()})"
+                post_btn = _find_button(entry, cfg.get("post_button", "подать объявление"))
+                if not post_btn:
+                    return f"⚠️ кнопка «подать объявление» не найдена ({clock()})"
+                type_msg = await self._click_locked(entry, post_btn, bot, timeout=15)
+                if type_msg is None:
+                    return f"⚠️ нет ответа на «подать объявление» ({clock()})"
 
-            phones_btn = _find_button(type_msg, cfg.get("type_phones_button", "телефоны"))
-            if not phones_btn:
-                return f"⚠️ кнопка «телефоны» не найдена ({clock()})"
-            clicked, rarity_msg = await self._click_and_wait(type_msg, phones_btn, bot, timeout=15)
-            if not clicked or rarity_msg is None:
-                return f"⚠️ нет ответа на «телефоны» ({clock()})"
+                phones_btn = _find_button(type_msg, cfg.get("type_phones_button", "телефоны"))
+                if not phones_btn:
+                    return f"⚠️ кнопка «телефоны» не найдена ({clock()})"
+                rarity_msg = await self._click_locked(type_msg, phones_btn, bot, timeout=15)
+                if rarity_msg is None:
+                    return f"⚠️ нет ответа на «телефоны» ({clock()})"
 
-            rarity_btn = _find_button(rarity_msg, rarity)
-            if not rarity_btn:
-                return f"⚠️ редкость «{rarity}» не найдена на Авито ({clock()})"
-            clicked, listing = await self._click_and_wait(rarity_msg, rarity_btn, bot, timeout=15)
-            if not clicked or listing is None:
-                return f"⚠️ нет ответа при выборе редкости ({clock()})"
+                rarity_btn = _find_button(rarity_msg, rarity)
+                if not rarity_btn:
+                    return f"⚠️ редкость «{rarity}» не найдена на Авито ({clock()})"
+                listing = await self._click_locked(rarity_msg, rarity_btn, bot, timeout=15)
+                if listing is None:
+                    return f"⚠️ нет ответа при выборе редкости ({clock()})"
 
-            model_btn = next(
-                (t for t in _all_buttons(listing) if t.strip() and not any(s in t.lower() for s in skip_nav)),
-                None,
-            )
-            if not model_btn:
-                return f"⚠️ нет доступных телефонов редкости «{rarity}» для продажи ({clock()})"
-            model_name = model_btn.rsplit("(", 1)[0].strip()
-            clicked, price_ask = await self._click_and_wait(listing, model_btn, bot, timeout=15)
-            if not clicked or price_ask is None:
-                return f"⚠️ «{model_name}»: нет ответа на выбор телефона ({clock()})"
+                model_btn = next(
+                    (t for t in _all_buttons(listing) if t.strip() and not any(s in t.lower() for s in skip_nav)),
+                    None,
+                )
+                if not model_btn:
+                    return f"⚠️ нет доступных телефонов редкости «{rarity}» для продажи ({clock()})"
+                model_name = model_btn.rsplit("(", 1)[0].strip()
+                price_ask = await self._click_locked(listing, model_btn, bot, timeout=15)
+                if price_ask is None:
+                    return f"⚠️ «{model_name}»: нет ответа на выбор телефона ({clock()})"
 
-            # цена и подтверждение — обычные текстовые ответы в чат (не кнопки),
-            # это ожидаемый шаг флоу самой игры (проверено вживую)
-            desc_ask = await self._send_and_wait(bot, str(price), timeout=15)
-            if desc_ask is None:
-                return f"⚠️ «{model_name}»: нет ответа на цену ({clock()})"
-            skip_btn = _find_button(desc_ask, cfg.get("description_skip_button", "пропустить"))
-            if not skip_btn:
-                return f"⚠️ «{model_name}»: кнопка «пропустить» описание не найдена ({clock()})"
-            clicked, confirm_ask = await self._click_and_wait(desc_ask, skip_btn, bot, timeout=15)
-            if not clicked or confirm_ask is None:
-                return f"⚠️ «{model_name}»: нет ответа после пропуска описания ({clock()})"
+                # цена и подтверждение — обычные текстовые ответы в чат (не кнопки),
+                # это ожидаемый шаг флоу самой игры (проверено вживую)
+                desc_ask = await self._send_locked(bot, str(price), timeout=15)
+                if desc_ask is None:
+                    return f"⚠️ «{model_name}»: нет ответа на цену ({clock()})"
+                skip_btn = _find_button(desc_ask, cfg.get("description_skip_button", "пропустить"))
+                if not skip_btn:
+                    return f"⚠️ «{model_name}»: кнопка «пропустить» описание не найдена ({clock()})"
+                confirm_ask = await self._click_locked(desc_ask, skip_btn, bot, timeout=15)
+                if confirm_ask is None:
+                    return f"⚠️ «{model_name}»: нет ответа после пропуска описания ({clock()})"
 
-            done = await self._send_and_wait(bot, cfg.get("confirm_text", "Подтвердить"), timeout=15)
-            if done is None:
-                return f"⚠️ «{model_name}»: нет ответа на подтверждение ({clock()})"
+                done = await self._send_locked(bot, cfg.get("confirm_text", "Подтвердить"), timeout=15)
+                if done is None:
+                    return f"⚠️ «{model_name}»: нет ответа на подтверждение ({clock()})"
 
             self._bump("avito_listed")
             price_fmt = f"{price:,}".replace(",", " ")
