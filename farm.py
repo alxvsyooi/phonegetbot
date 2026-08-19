@@ -1436,7 +1436,16 @@ class FarmModule:
         (MARKET)» -> клик «Подтвердить ордер». Продаёт весь кошелёк (сколько
         P-Coins накопилось после «Снять P-Coins с фермы» — см. collect_mining).
         Используется циклом (тумблер pcoin_exchange_enabled) и кнопкой «💱
-        Проверить биржу сейчас»."""
+        Проверить биржу сейчас».
+
+        Весь флоу — ПОД ОДНИМ непрерывным локом бота (см. _send_locked/
+        _click_locked в automation.py), а не отдельным локом на каждый шаг:
+        раньше между шагами (после открытия биржи, после клика «Продать» и
+        т.д.) лок отпускался, и параллельный цикл ЭТОГО ЖЕ аккаунта (карточки/
+        майнинг/etc.) мог встрять своим сообщением боту прямо посреди диалога
+        «сколько продать» — похоже, именно так игра теряла введённое
+        количество и откатывалась к минимуму (репорт: автосброс продаёт
+        1 P-Coin вместо всего кошелька)."""
         if not self.client or not self.running:
             self.last_pcoin_exchange = "аккаунт не запущен"
             return self.last_pcoin_exchange
@@ -1447,45 +1456,46 @@ class FarmModule:
         bot = cfg.get("bot") or CARDS_BOT
         open_cmd = cfg.get("open_command") or EXCHANGE_WORD
         try:
-            root = await self._send_and_wait(bot, open_cmd, timeout=15)
-            if root is None:
-                self.last_pcoin_exchange = f"⚠️ биржа ({open_cmd}) не отвечает ({clock()})"
-                return self.last_pcoin_exchange
+            async with self._lock_for_bot(bot):
+                root = await self._send_locked(bot, open_cmd, timeout=15)
+                if root is None:
+                    self.last_pcoin_exchange = f"⚠️ биржа ({open_cmd}) не отвечает ({clock()})"
+                    return self.last_pcoin_exchange
 
-            wallet = parse_pcoin_wallet(_msg_text(root))
-            if wallet is None:
-                self.last_pcoin_exchange = f"⚠️ не разобрал кошелёк биржи ({clock()})"
-                await self._notify_owner_exchange_unexpected(_msg_text(root))
-                return self.last_pcoin_exchange
-            qty = int(wallet)
-            if qty <= 0:
-                self.last_pcoin_exchange = f"нечего продавать (P-Coins: {wallet:g}) ({clock()})"
-                return self.last_pcoin_exchange
+                wallet = parse_pcoin_wallet(_msg_text(root))
+                if wallet is None:
+                    self.last_pcoin_exchange = f"⚠️ не разобрал кошелёк биржи ({clock()})"
+                    await self._notify_owner_exchange_unexpected(_msg_text(root))
+                    return self.last_pcoin_exchange
+                qty = int(wallet)
+                if qty <= 0:
+                    self.last_pcoin_exchange = f"нечего продавать (P-Coins: {wallet:g}) ({clock()})"
+                    return self.last_pcoin_exchange
 
-            sell_btn = _find_button(root, cfg.get("sell_button", "продать"))
-            if not sell_btn:
-                self.last_pcoin_exchange = f"⚠️ кнопка «продать» не найдена ({clock()})"
-                return self.last_pcoin_exchange
-            clicked, ask_qty = await self._click_and_wait(root, sell_btn, bot, timeout=15)
-            if not clicked or ask_qty is None:
-                self.last_pcoin_exchange = f"⚠️ нет ответа на «продать» ({clock()})"
-                return self.last_pcoin_exchange
+                sell_btn = _find_button(root, cfg.get("sell_button", "продать"))
+                if not sell_btn:
+                    self.last_pcoin_exchange = f"⚠️ кнопка «продать» не найдена ({clock()})"
+                    return self.last_pcoin_exchange
+                ask_qty = await self._click_locked(root, sell_btn, bot, timeout=15)
+                if ask_qty is None:
+                    self.last_pcoin_exchange = f"⚠️ нет ответа на «продать» ({clock()})"
+                    return self.last_pcoin_exchange
 
-            # бот просит количество ОТВЕТОМ В ЧАТ, а не кнопкой — это ожидаемый шаг
-            # флоу самой игры (проверено вживую), не «текст посреди навигации»
-            order = await self._send_and_wait(bot, str(qty), timeout=15)
-            if order is None:
-                self.last_pcoin_exchange = f"⚠️ нет ответа на количество «{qty}» ({clock()})"
-                return self.last_pcoin_exchange
-            confirm_btn = _find_button(order, cfg.get("confirm_button", "подтвердить ордер"))
-            if not confirm_btn:
-                self.last_pcoin_exchange = f"⚠️ нет кнопки подтверждения ордера ({clock()})"
-                await self._notify_owner_exchange_unexpected(_msg_text(order))
-                return self.last_pcoin_exchange
-            clicked2, done = await self._click_and_wait(order, confirm_btn, bot, timeout=15)
-            if not clicked2:
-                self.last_pcoin_exchange = f"⚠️ ордер продажи не подтвердился ({clock()})"
-                return self.last_pcoin_exchange
+                # бот просит количество ОТВЕТОМ В ЧАТ, а не кнопкой — это ожидаемый шаг
+                # флоу самой игры (проверено вживую), не «текст посреди навигации»
+                order = await self._send_locked(bot, str(qty), timeout=15)
+                if order is None:
+                    self.last_pcoin_exchange = f"⚠️ нет ответа на количество «{qty}» ({clock()})"
+                    return self.last_pcoin_exchange
+                confirm_btn = _find_button(order, cfg.get("confirm_button", "подтвердить ордер"))
+                if not confirm_btn:
+                    self.last_pcoin_exchange = f"⚠️ нет кнопки подтверждения ордера ({clock()})"
+                    await self._notify_owner_exchange_unexpected(_msg_text(order))
+                    return self.last_pcoin_exchange
+                done = await self._click_locked(order, confirm_btn, bot, timeout=15)
+                if done is None:
+                    self.last_pcoin_exchange = f"⚠️ ордер продажи не подтвердился ({clock()})"
+                    return self.last_pcoin_exchange
 
             self._bump("pcoin_sold", qty)
             self.last_pcoin_exchange = f"💱 продано {qty} P-Coin ({clock()} {today_msk()})"
@@ -1534,69 +1544,73 @@ class FarmModule:
         Отдельного сообщения об успехе нет — то же сообщение просто редактируется
         обратно в «Биржа P-Coin» с уменьшенным балансом (баланс здесь не
         перепроверяем повторно текстом — см. общий баг-паттерн этого бота:
-        текстовая команда посреди навигации сбрасывает диалог)."""
+        текстовая команда посреди навигации сбрасывает диалог).
+
+        Весь флоу — ПОД ОДНИМ непрерывным локом бота (см. dump_pcoins_now —
+        та же причина: без этого параллельный цикл того же аккаунта мог
+        встрять своим сообщением посреди многошагового диалога с биржей)."""
         cfg = self.exchange_cfg
         bot = cfg.get("bot") or CARDS_BOT
         open_cmd = cfg.get("open_command") or EXCHANGE_WORD
         try:
-            root = await self._send_and_wait(bot, open_cmd, timeout=15)
-            if root is None:
-                self.last_pcoin_exchange = f"⚠️ биржа ({open_cmd}) не отвечает ({clock()})"
-                return self.last_pcoin_exchange
+            async with self._lock_for_bot(bot):
+                root = await self._send_locked(bot, open_cmd, timeout=15)
+                if root is None:
+                    self.last_pcoin_exchange = f"⚠️ биржа ({open_cmd}) не отвечает ({clock()})"
+                    return self.last_pcoin_exchange
 
-            wallet = parse_pcoin_wallet(_msg_text(root))
-            if wallet is None:
-                self.last_pcoin_exchange = f"⚠️ не разобрал кошелёк биржи ({clock()})"
-                await self._notify_owner_exchange_unexpected(_msg_text(root))
-                return self.last_pcoin_exchange
-            qty = int(wallet)
-            if qty <= 0:
-                self.last_pcoin_exchange = f"нечего переводить (P-Coins: {wallet:g}) ({clock()})"
-                return self.last_pcoin_exchange
+                wallet = parse_pcoin_wallet(_msg_text(root))
+                if wallet is None:
+                    self.last_pcoin_exchange = f"⚠️ не разобрал кошелёк биржи ({clock()})"
+                    await self._notify_owner_exchange_unexpected(_msg_text(root))
+                    return self.last_pcoin_exchange
+                qty = int(wallet)
+                if qty <= 0:
+                    self.last_pcoin_exchange = f"нечего переводить (P-Coins: {wallet:g}) ({clock()})"
+                    return self.last_pcoin_exchange
 
-            send_btn = _find_button(root, cfg.get("send_button", "отправить p-coins"))
-            if not send_btn:
-                self.last_pcoin_exchange = f"⚠️ кнопка «отправить P-Coins» не найдена ({clock()})"
-                return self.last_pcoin_exchange
-            clicked, ask_target = await self._click_and_wait(root, send_btn, bot, timeout=15)
-            if not clicked or ask_target is None:
-                self.last_pcoin_exchange = f"⚠️ нет ответа на «отправить P-Coins» ({clock()})"
-                return self.last_pcoin_exchange
+                send_btn = _find_button(root, cfg.get("send_button", "отправить p-coins"))
+                if not send_btn:
+                    self.last_pcoin_exchange = f"⚠️ кнопка «отправить P-Coins» не найдена ({clock()})"
+                    return self.last_pcoin_exchange
+                ask_target = await self._click_locked(root, send_btn, bot, timeout=15)
+                if ask_target is None:
+                    self.last_pcoin_exchange = f"⚠️ нет ответа на «отправить P-Coins» ({clock()})"
+                    return self.last_pcoin_exchange
 
-            raw = target.lstrip("@")
-            target_norm = raw if raw.isdigit() else f"@{raw}"
-            not_found_marker = (cfg.get("not_found_marker") or "пользователь не найден").lower()
-            ask_qty = await self._send_and_wait(bot, target_norm, timeout=15)
-            if ask_qty is None:
-                self.last_pcoin_exchange = f"⚠️ нет ответа на получателя «{target_norm}» ({clock()})"
-                return self.last_pcoin_exchange
-            if not_found_marker in _msg_text(ask_qty).lower():
-                self.last_pcoin_exchange = f"⚠️ получатель «{target_norm}» не найден игрой ({clock()})"
-                return self.last_pcoin_exchange
+                raw = target.lstrip("@")
+                target_norm = raw if raw.isdigit() else f"@{raw}"
+                not_found_marker = (cfg.get("not_found_marker") or "пользователь не найден").lower()
+                ask_qty = await self._send_locked(bot, target_norm, timeout=15)
+                if ask_qty is None:
+                    self.last_pcoin_exchange = f"⚠️ нет ответа на получателя «{target_norm}» ({clock()})"
+                    return self.last_pcoin_exchange
+                if not_found_marker in _msg_text(ask_qty).lower():
+                    self.last_pcoin_exchange = f"⚠️ получатель «{target_norm}» не найден игрой ({clock()})"
+                    return self.last_pcoin_exchange
 
-            ask_comment = await self._send_and_wait(bot, str(qty), timeout=15)
-            if ask_comment is None:
-                self.last_pcoin_exchange = f"⚠️ нет ответа на количество «{qty}» ({clock()})"
-                return self.last_pcoin_exchange
+                ask_comment = await self._send_locked(bot, str(qty), timeout=15)
+                if ask_comment is None:
+                    self.last_pcoin_exchange = f"⚠️ нет ответа на количество «{qty}» ({clock()})"
+                    return self.last_pcoin_exchange
 
-            skip_btn = _find_button(ask_comment, cfg.get("skip_comment_button", "пропустить"))
-            confirm_screen = ask_comment
-            if skip_btn:
-                clicked_skip, after_skip = await self._click_and_wait(ask_comment, skip_btn, bot, timeout=15)
-                confirm_screen = after_skip if clicked_skip and after_skip is not None else None
-            if confirm_screen is None:
-                self.last_pcoin_exchange = f"⚠️ нет экрана подтверждения перевода ({clock()})"
-                return self.last_pcoin_exchange
+                skip_btn = _find_button(ask_comment, cfg.get("skip_comment_button", "пропустить"))
+                confirm_screen = ask_comment
+                if skip_btn:
+                    confirm_screen = await self._click_locked(ask_comment, skip_btn, bot, timeout=15)
+                if confirm_screen is None:
+                    self.last_pcoin_exchange = f"⚠️ нет экрана подтверждения перевода ({clock()})"
+                    return self.last_pcoin_exchange
 
-            confirm_btn = _find_button(confirm_screen, cfg.get("transfer_confirm_button", "подтвердить"))
-            if not confirm_btn:
-                self.last_pcoin_exchange = f"⚠️ нет кнопки подтверждения перевода ({clock()})"
-                await self._notify_owner_exchange_unexpected(_msg_text(confirm_screen))
-                return self.last_pcoin_exchange
-            clicked2, _done = await self._click_and_wait(confirm_screen, confirm_btn, bot, timeout=15)
-            if not clicked2:
-                self.last_pcoin_exchange = f"⚠️ перевод не подтвердился ({clock()})"
-                return self.last_pcoin_exchange
+                confirm_btn = _find_button(confirm_screen, cfg.get("transfer_confirm_button", "подтвердить"))
+                if not confirm_btn:
+                    self.last_pcoin_exchange = f"⚠️ нет кнопки подтверждения перевода ({clock()})"
+                    await self._notify_owner_exchange_unexpected(_msg_text(confirm_screen))
+                    return self.last_pcoin_exchange
+                done = await self._click_locked(confirm_screen, confirm_btn, bot, timeout=15)
+                if done is None:
+                    self.last_pcoin_exchange = f"⚠️ перевод не подтвердился ({clock()})"
+                    return self.last_pcoin_exchange
 
             self._bump("pcoin_sent", qty)
             self.last_pcoin_exchange = (
