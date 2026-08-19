@@ -123,7 +123,6 @@ class _WorkerBase:
         self.last_repair = "—"
         self.last_review = "—"  # отдельно от last_repair — см. RepairModule._maybe_leave_review
         self.last_equipment_repair = "—"  # отдельно от last_repair — см. RepairModule.repair_equipment_now
-        self.last_upgrade = "—"
         self.last_accept = "—"
         self.last_farm_maintenance = "—"
         self.last_farm_fill = "—"
@@ -480,53 +479,62 @@ class _WorkerBase:
         последнее увиденное сообщение, clicked_target — была ли реально нажата
         target_button."""
         async with self._lock_for_bot(bot):
-            # Регистрируем ожидание ДО клика — та же гонка "клик/ответ", что и в
-            # _click_and_wait выше (см. комментарий там)
-            fut = self._register_wait(bot)
-            clicked = await self._try_click(message, button_text)
-            if not clicked:
+            return await self._click_and_wait_for_button_locked(
+                message, button_text, bot, target_button, timeout, extra_waits)
+
+    async def _click_and_wait_for_button_locked(
+        self, message, button_text: str, bot: str, target_button: str,
+        timeout: int = 12, extra_waits: int = 2,
+    ) -> tuple[bool, Any]:
+        """Как _click_and_wait_for_button, но БЕЗ собственного лока — вызывающий
+        уже должен держать _lock_for_bot(bot) сам (см. _send_locked/_click_locked:
+        многошаговый диалог с ботом должен идти под ОДНИМ непрерывным локом)."""
+        # Регистрируем ожидание ДО клика — та же гонка "клик/ответ", что и в
+        # _click_locked (см. комментарий там)
+        fut = self._register_wait(bot)
+        clicked = await self._try_click(message, button_text)
+        if not clicked:
+            self._forget_wait(bot, fut)
+            return False, None
+        msg = None
+        # На повторных попытках (после первого безкнопочного ответа) timeout короче:
+        # если это была ПРОМЕЖУТОЧНАЯ заглушка — настоящий диалог обычно приходит
+        # быстро; если бот уже дал финальный ответ без кнопок — не тратим полный
+        # timeout впустую на каждой из extra_waits попыток подряд (было до 45с)
+        retry_timeout = max(3, timeout // 3)
+        for i in range(1 + max(0, extra_waits)):
+            if i > 0:
+                fut = self._register_wait(bot)
+            try:
+                msg = await asyncio.wait_for(fut, timeout if i == 0 else retry_timeout)
+            except asyncio.TimeoutError:
                 self._forget_wait(bot, fut)
-                return False, None
-            msg = None
-            # На повторных попытках (после первого безкнопочного ответа) timeout короче:
-            # если это была ПРОМЕЖУТОЧНАЯ заглушка — настоящий диалог обычно приходит
-            # быстро; если бот уже дал финальный ответ без кнопок — не тратим полный
-            # timeout впустую на каждой из extra_waits попыток подряд (было до 45с)
-            retry_timeout = max(3, timeout // 3)
-            for i in range(1 + max(0, extra_waits)):
-                if i > 0:
-                    fut = self._register_wait(bot)
-                try:
-                    msg = await asyncio.wait_for(fut, timeout if i == 0 else retry_timeout)
-                except asyncio.TimeoutError:
-                    self._forget_wait(bot, fut)
+                return False, msg
+            mk = getattr(msg, "reply_markup", None)
+            rows = mk.inline_keyboard if mk and getattr(mk, "inline_keyboard", None) else []
+            btn = next(
+                (b.text for row in rows for b in row
+                 if target_button.lower() in (getattr(b, "text", "") or "").lower()),
+                None,
+            )
+            if btn:
+                # раньше здесь просто возвращали msg (диалог ДО клика по target_button),
+                # из-за чего вызывающий код принимал диалог «Вы уверены?» за результат
+                # покупки, не находил в нём кнопок следующего шага и решал, что всё
+                # сломалось, — а реальный ответ на подтверждение никто не забирал
+                ok = await self._try_click(msg, btn)
+                if not ok:
                     return False, msg
-                mk = getattr(msg, "reply_markup", None)
-                rows = mk.inline_keyboard if mk and getattr(mk, "inline_keyboard", None) else []
-                btn = next(
-                    (b.text for row in rows for b in row
-                     if target_button.lower() in (getattr(b, "text", "") or "").lower()),
-                    None,
-                )
-                if btn:
-                    # раньше здесь просто возвращали msg (диалог ДО клика по target_button),
-                    # из-за чего вызывающий код (farm.py.upgrade_account) принимал диалог
-                    # «Вы уверены?» за результат покупки, не находил в нём кнопок следующего
-                    # шага и решал, что всё сломалось, — а реальный ответ на подтверждение
-                    # никто не забирал (баг: прокачка на деле не покупала уровни)
-                    ok = await self._try_click(msg, btn)
-                    if not ok:
-                        return False, msg
-                    fut2 = self._register_wait(bot)
-                    try:
-                        result = await asyncio.wait_for(fut2, timeout)
-                    except asyncio.TimeoutError:
-                        self._forget_wait(bot, fut2)
-                        return True, None
-                    return True, result
-                if rows:
-                    return False, msg  # другой экран с другими кнопками — не промежуточное сообщение
-            return False, msg
+                fut2 = self._register_wait(bot)
+                try:
+                    result = await asyncio.wait_for(fut2, timeout)
+                except asyncio.TimeoutError:
+                    self._forget_wait(bot, fut2)
+                    return True, None
+                return True, result
+            if rows:
+                return False, msg  # другой экран с другими кнопками — не промежуточное сообщение
+        return False, msg
 
     # ---------- клик с повтором, если бот просто не спешит с ответом ----------
     async def _click_retry(self, message, button_text: str, bot: str, cfg: dict, timeout: int = 15):
@@ -546,6 +554,20 @@ class _WorkerBase:
             if i < attempts - 1:
                 await asyncio.sleep(retry_delay)
         return clicked, None
+
+    async def _click_retry_locked(self, message, button_text: str, bot: str, cfg: dict, timeout: int = 15):
+        """Как _click_retry, но БЕЗ собственного лока — см. _send_locked. Возвращает
+        просто result (None — не нашли/не кликнули/не дождались), без отдельного
+        флага clicked: многошаговые locked-флоу и так прерываются на None."""
+        retry_delay = max(2, int(cfg.get("retry_interval", 5)))
+        attempts = max(1, int(cfg.get("retry_attempts", 3)))
+        for i in range(attempts):
+            result = await self._click_locked(message, button_text, bot, timeout=timeout)
+            if result is not None:
+                return result
+            if i < attempts - 1:
+                await asyncio.sleep(retry_delay)
+        return None
 
     async def _await_bot_lock(self, username: str) -> None:
         async with self._lock_for_bot(username):

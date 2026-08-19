@@ -20,8 +20,6 @@ from storage import (
     MINING_WORD, FARM_WITHDRAW_BUTTON, FARM_REMOVE_BUTTON, FARM_BROKEN_MARKER,
     BALANCE_WORD, PAY_CONFIRM_BUTTON, CONTAINER_WORD,
     DAILY_REWARD_WORD, DAILY_REWARD_BUTTON,
-    UPGRADE_WORD, UPGRADE_CATEGORIES, UPGRADE_MAX_MARKER, UPGRADE_BUY_BUTTON, UPGRADE_RESERVE,
-    UPGRADE_MIN_BALANCE_TO_START, UPGRADE_STEP_DELAY,
     EXCHANGE_WORD,
 )
 from common import MSK, parse_hhmm, seconds_until_msk, fmt_duration, clock, today_msk
@@ -235,34 +233,6 @@ def parse_unit_price(text: str | None) -> int | None:
         return None
     digits = re.sub(r"\D", "", m.group(1))
     return int(digits) if digits else None
-
-
-# "Улучшить за 10,000" (кнопка «Магазина улучшений»)
-_UPGRADE_COST_RE = re.compile(r"улучшить\s+за\s*([\d\s.,]+)", re.IGNORECASE)
-# "Текущий уровень: 1" (детальный экран категории «Магазина улучшений»)
-_UPGRADE_LEVEL_RE = re.compile(r"текущий\s+уровень:?\s*(\d+)", re.IGNORECASE)
-UPGRADE_MAX_LEVEL = 6
-
-
-def _fmt_points(n: int) -> str:
-    return f"{n:,}".replace(",", " ")
-
-
-def parse_upgrade_cost(button_text: str | None) -> int | None:
-    if not button_text:
-        return None
-    m = _UPGRADE_COST_RE.search(button_text)
-    if not m:
-        return None
-    digits = re.sub(r"\D", "", m.group(1))
-    return int(digits) if digits else None
-
-
-def parse_upgrade_level(text: str | None) -> int | None:
-    if not text:
-        return None
-    m = _UPGRADE_LEVEL_RE.search(text)
-    return int(m.group(1)) if m else None
 
 
 def parse_total_price(text: str | None) -> int | None:
@@ -992,6 +962,22 @@ class FarmModule:
                 await asyncio.sleep(retry_interval)
         return None
 
+    async def _click_step_locked(self, bot: str, msg, label_substr: str, cfg: dict, timeout: int = 15):
+        """Как _click_step, но БЕЗ собственного лока — вызывающий уже должен
+        держать _lock_for_bot(bot) сам (см. automation.py._send_locked)."""
+        btn = _find_button(msg, label_substr)
+        if not btn:
+            return None
+        retry_interval = max(3, int(cfg.get("retry_interval", 10)))
+        attempts = max(1, int(cfg.get("retry_attempts", 3)))
+        for i in range(attempts):
+            result = await self._click_locked(msg, btn, bot, timeout=timeout)
+            if result is not None:
+                return result
+            if i < attempts - 1:
+                await asyncio.sleep(retry_interval)
+        return None
+
     async def _click_confirm(self, msg, label_substr: str, cfg: dict) -> bool:
         btn = _find_button(msg, label_substr)
         if not btn:
@@ -1029,171 +1015,14 @@ class FarmModule:
             lines.append(f"📱 Телефонов в коллекции: {collection}")
         return "\n".join(lines)
 
-    async def upgrade_account(self) -> str:
-        """💰 Прокачка аккаунта: проходит по всем 7 категориям «Магазина улучшений»
-        (Перезарядка, Шансы выпадения, Шансы апгрейда, Стойка/Охлаждение/Питание
-        фермы, Лимит покупок) и в каждой жмёт «Улучшить за N», пока не упрётся в
-        максимальный уровень (все категории 6-уровневые) или пока баланса не хватит
-        с учётом неприкосновенного запаса UPGRADE_RESERVE. Полностью прокачать всё —
-        ощутимые деньги: ниже фиксированного порога UPGRADE_MIN_BALANCE_TO_START (не
-        настройка, не меняется через бота) даже не начинаем, только предупреждаем.
-
-        Баланс проверяется ОДИН РАЗ в самом начале, ДО входа в магазин, и дальше
-        отслеживается ЛОКАЛЬНО (вычитанием потраченного), а НЕ повторным текстовым
-        запросом посреди навигации по инлайн-кнопкам: если слать текстовую команду
-        между кликами, игровой бот сбрасывает состояние диалога, и кнопка «Улучшить
-        за N» на уже показанном сообщении перестаёт отвечать (та же проблема уже
-        чинилась в shop.py — раньше баланс запрашивался заново перед КАЖДОЙ
-        покупкой, из-за чего прокачка успевала сделать ровно один апгрейд и глохла,
-        репорт пользователя). Между последовательными покупками — небольшая пауза
-        (UPGRADE_STEP_DELAY), чтобы не долбить игру слишком резко подряд."""
-        if not self.client or not self.running:
-            self.last_upgrade = "аккаунт не запущен"
-            return self.last_upgrade
-        if self._trade_mode:
-            self.last_upgrade = "идёт трейд — попробуй чуть позже"
-            return self.last_upgrade
-
-        balance = await self._check_balance()
-        if balance is None:
-            self.last_upgrade = f"⚠️ не удалось проверить баланс ({clock()})"
-            return self.last_upgrade
-        if balance < UPGRADE_MIN_BALANCE_TO_START:
-            self.last_upgrade = (
-                f"⚠️ для прокачки нужно минимум {_fmt_points(UPGRADE_MIN_BALANCE_TO_START)} "
-                f"ТОчек на балансе (сейчас {_fmt_points(balance)}) ({clock()})")
-            return self.last_upgrade
-
-        root = await self._send_and_wait(CARDS_BOT, UPGRADE_WORD, timeout=15)
-        if root is None:
-            self.last_upgrade = f"⚠️ нет ответа на «{UPGRADE_WORD}» ({clock()})"
-            return self.last_upgrade
-
-        lines: list[str] = []
-        any_upgraded = False
-        for label in UPGRADE_CATEGORIES:
-            btn = _find_button(root, label)
-            if not btn:
-                # root мог протухнуть (см. комментарий ниже про переоткрытие магазина) —
-                # даём ему один шанс обновиться, прежде чем сдаться по этой категории
-                refreshed = await self._send_and_wait(CARDS_BOT, UPGRADE_WORD, timeout=15)
-                if refreshed is not None:
-                    root = refreshed
-                    btn = _find_button(root, label)
-            if not btn:
-                lines.append(f"• {label}: кнопка не найдена")
-                continue
-            clicked, cur = await self._click_and_wait(root, btn, CARDS_BOT, timeout=15)
-            if not clicked or cur is None:
-                lines.append(f"• {label}: нет ответа")
-                continue
-
-            level_ups, spent, stop_reason = 0, 0, None
-            level = parse_upgrade_level(_msg_text(cur))
-            while True:
-                dtext = _msg_text(cur)
-                if UPGRADE_MAX_MARKER in dtext.lower() or (level is not None and level >= UPGRADE_MAX_LEVEL):
-                    break
-                buy_btn = _find_button(cur, UPGRADE_BUY_BUTTON)
-                if not buy_btn:
-                    stop_reason = "неизвестный формат ответа, стоп"
-                    break
-                cost = parse_upgrade_cost(buy_btn)
-                if cost is None:
-                    stop_reason = "не смог разобрать цену, стоп"
-                    break
-                if balance - cost < UPGRADE_RESERVE:
-                    stop_reason = (
-                        f"не хватает баланса с запасом (цена {_fmt_points(cost)}, запас "
-                        f"{_fmt_points(UPGRADE_RESERVE)}, баланс {_fmt_points(balance)})")
-                    break
-                # игра переспрашивает подтверждение перед покупкой («✅ Подтвердить»),
-                # но иногда сначала шлёт промежуточное сообщение ДО самого диалога
-                # подтверждения (обнаружено вживую на /pay, см. _execute_pay) —
-                # _click_and_wait_for_button не сдаётся после первого же ответа И
-                # (после фикса) возвращает РЕАЛЬНЫЙ результат покупки, а не сам
-                # диалог подтверждения (раньше из-за этого код думал, что купил,
-                # хотя игра ещё ничего не поменяла — экран так и оставался на
-                # старом уровне/цене, репорт пользователя со скриншотом)
-                clicked3, result_msg = await self._click_and_wait_for_button(
-                    cur, buy_btn, CARDS_BOT, "подтвердить", timeout=15)
-                if not clicked3 or result_msg is None:
-                    stop_reason = "подтверждение покупки не прошло, стоп"
-                    break
-                # сверяем реальный уровень с экрана результата — если он не вырос,
-                # покупка на деле не прошла, несмотря на «успешный» клик
-                new_level = parse_upgrade_level(_msg_text(result_msg))
-                if new_level is not None and level is not None and new_level <= level:
-                    stop_reason = f"уровень не изменился после покупки (был {level}), стоп"
-                    break
-                level = new_level if new_level is not None else ((level + 1) if level is not None else None)
-                level_ups += 1
-                spent += cost
-                balance -= cost
-                any_upgraded = True
-                await asyncio.sleep(UPGRADE_STEP_DELAY)
-                # экран успеха даёт «⬅️ Вернуться в магазин» (не «Назад») — жмём его,
-                # чтобы вернуться в деталку категории с обновлённой ценой след. уровня
-                return_btn = (
-                    _find_button(result_msg, "вернуться в магазин")
-                    or _find_button(result_msg, "назад")
-                )
-                if return_btn:
-                    clicked4, cur2 = await self._click_and_wait(
-                        result_msg, return_btn, CARDS_BOT, timeout=15)
-                    cur = cur2 if clicked4 and cur2 is not None else result_msg
-                else:
-                    cur = result_msg
-
-            if level_ups:
-                level_note = f" [ур. {level}/{UPGRADE_MAX_LEVEL}]" if level is not None else ""
-                summary = f"+{level_ups} ур.{level_note} (потрачено {_fmt_points(spent)} ТОчек)"
-                if stop_reason:
-                    summary += f" — {stop_reason}"
-                lines.append(f"• {label}: {summary}")
-            elif stop_reason:
-                lines.append(f"• {label}: {stop_reason}")
-            else:
-                lines.append(f"• {label}: уже максимум")
-
-            back_btn = _find_button(cur, "назад")
-            new_root = None
-            if back_btn:
-                clicked3, back_msg = await self._click_and_wait(cur, back_btn, CARDS_BOT, timeout=15)
-                if clicked3 and back_msg is not None:
-                    new_root = back_msg
-            if new_root is None:
-                # неожиданный экран вместо магазина (например, попало уведомление о
-                # достижении, всплывшее от того же бота между кликами) - "назад" не
-                # нашли, а протухший root убивает ВСЕ следующие категории (клики по
-                # старому меню бот молча игнорирует) - переоткрываем магазин заново
-                new_root = await self._send_and_wait(CARDS_BOT, UPGRADE_WORD, timeout=15)
-            if new_root is not None:
-                root = new_root
-            # небольшая пауза перед следующей категорией НЕЗАВИСИМО от того, была ли
-            # покупка — если категория уже максимальная, покупок нет и паузы после
-            # неё тоже не было; несколько категорий подряд без единой паузы ловят
-            # антифлуд игры, и следующие категории перестают отвечать (репорт
-            # пользователя: «проверяет первые 3 и если они прокачены — перестаёт»)
-            await asyncio.sleep(UPGRADE_STEP_DELAY)
-
-        all_maxed = all("максимум" in ln.lower() for ln in lines) if lines else True
-        if any_upgraded:
-            header = f"✅ прокачано ({clock()}):"
-        elif all_maxed:
-            header = f"✅ всё уже на максимуме ({clock()})"
-        else:
-            header = f"⚠️ прокачка не удалась ({clock()}):"
-        self.last_upgrade = f"{header}\n" + "\n".join(lines) if lines else header
-        return self.last_upgrade
-
     async def _buy_category(
         self, bot: str, shop_msg, category_label: str, cfg: dict, balance: int | None,
     ) -> tuple[bool, str, int]:
-        """Возвращает (успех, инфо-строка, потрачено ТОчек)."""
+        """Возвращает (успех, инфо-строка, потрачено ТОчек). Вызывается уже ПОД
+        локом бота (см. _buy_containers) — locked-варианты, без своего лока."""
         if not _find_button(shop_msg, category_label):
             return False, "", 0
-        detail = await self._click_step(bot, shop_msg, category_label, cfg, timeout=15)
+        detail = await self._click_step_locked(bot, shop_msg, category_label, cfg, timeout=15)
         if detail is None:
             return False, f"{category_label}: нет ответа на выбор категории", 0
         dtext = _msg_text(detail)
@@ -1226,15 +1055,15 @@ class FarmModule:
         confirm_btn = cfg.get("confirm_button", "подтвердить")
 
         if remaining == 1:
-            step = await self._click_step(bot, detail, single_btn, cfg, timeout=15)
+            step = await self._click_step_locked(bot, detail, single_btn, cfg, timeout=15)
         else:
-            qty_msg = await self._click_step(bot, detail, bulk_btn, cfg, timeout=15)
+            qty_msg = await self._click_step_locked(bot, detail, bulk_btn, cfg, timeout=15)
             if qty_msg is None:
                 return False, f"{category_label}: нет ответа на «купить оптом»", 0
             qty_btn = _numeric_button(qty_msg, remaining) or _max_numeric_button(qty_msg)
             if not qty_btn:
                 return False, f"{category_label}: не нашёл кнопку количества", 0
-            step = await self._click_step(bot, qty_msg, qty_btn, cfg, timeout=15)
+            step = await self._click_step_locked(bot, qty_msg, qty_btn, cfg, timeout=15)
 
         if step is None:
             return False, f"{category_label}: нет ответа после выбора количества", 0
@@ -1257,30 +1086,35 @@ class FarmModule:
         (тумблерами containers_buy_*) категории заданное количество (containers_qty_*,
         0 = максимум доступного) — не больше, чем позволяют лимит игры и баланс.
         Баланс проверяется один раз в начале и уменьшается по ходу покупок — чтобы
-        не потратить на дорогие/донатные больше, чем реально есть."""
+        не потратить на дорогие/донатные больше, чем реально есть.
+
+        Весь проход по категориям — ПОД ОДНИМ непрерывным локом бота (см.
+        shop.py._buy_phones_now_impl): без этого параллельный цикл того же
+        аккаунта мог встрять своим сообщением между категориями/шагами покупки."""
         prefs = cfg.get("preferred_categories") or ["Донатный", "Дорогой", "Бюджетный"]
         results = []
         msg = shop_msg
         open_cmd = cfg.get("open_command") or CONTAINER_WORD
         balance = await self._check_balance()
         remaining_labels = [l for l in prefs if self._category_allowed(l)]
-        for i, label in enumerate(remaining_labels):
-            if balance is not None and balance <= 0:
-                break
-            ok, info, spent = await self._buy_category(bot, msg, label, cfg, balance)
-            if ok:
-                results.append(info)
-                if balance is not None:
-                    balance -= spent
-            # Обновляем меню магазина заново перед следующей категорией НЕЗАВИСИМО
-            # от успеха — если попытка дошла до клика внутри категории (даже
-            # неудачно, напр. таймаут на «купить оптом»), диалог игрового бота мог
-            # сдвинуться с исходного меню, и клик по СТАРОМУ сообщению для следующей
-            # категории просто перестаёт отвечать (флоу «зависает» точно на этом шаге).
-            if i < len(remaining_labels) - 1:
-                refreshed = await self._send_and_wait(bot, open_cmd, timeout=20)
-                if refreshed is not None:
-                    msg = refreshed
+        async with self._lock_for_bot(bot):
+            for i, label in enumerate(remaining_labels):
+                if balance is not None and balance <= 0:
+                    break
+                ok, info, spent = await self._buy_category(bot, msg, label, cfg, balance)
+                if ok:
+                    results.append(info)
+                    if balance is not None:
+                        balance -= spent
+                # Обновляем меню магазина заново перед следующей категорией НЕЗАВИСИМО
+                # от успеха — если попытка дошла до клика внутри категории (даже
+                # неудачно, напр. таймаут на «купить оптом»), диалог игрового бота мог
+                # сдвинуться с исходного меню, и клик по СТАРОМУ сообщению для следующей
+                # категории просто перестаёт отвечать (флоу «зависает» точно на этом шаге).
+                if i < len(remaining_labels) - 1:
+                    refreshed = await self._send_locked(bot, open_cmd, timeout=20)
+                    if refreshed is not None:
+                        msg = refreshed
         return "; ".join(results)
 
     _ALERT_DEDUP_DIGITS_RE = re.compile(r"\d+")
