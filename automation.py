@@ -391,6 +391,32 @@ class _WorkerBase:
             self._bot_locks[key] = lock
         return lock
 
+    async def _send_locked(self, username: str, text: str, timeout: int = 25, throttle: bool = True):
+        """Как _send_and_wait, но БЕЗ собственного лока — вызывающий уже должен
+        держать _lock_for_bot(username) сам (см. _execute_pay/dump_pcoins_now:
+        многошаговый диалог с ботом — открыть экран -> выбрать -> ответить
+        числом -> подтвердить — должен идти под ОДНИМ непрерывным локом, а не
+        отдельным локом на каждый шаг, иначе в паузах между шагами параллельный
+        цикл того же аккаунта (карточки/майнинг/etc.) может встрять СВОИМ
+        сообщением боту прямо посреди диалога и сбить его серверное состояние)."""
+        if throttle:
+            await asyncio.sleep(ACTION_DELAY)
+        fut = self._register_wait(username)
+        try:
+            await self.client.send_message(username, text)
+        except Exception:
+            # send_message сам бросил (FloodWait/сеть/PeerIdInvalid) — future уже
+            # зарегистрирован в _pending, но ответа на него никогда не будет; без
+            # этой чистки следующий РЕАЛЬНЫЙ ответ бота (FIFO) доставался бы этому
+            # мёртвому future, а настоящий вызов ловил бы таймаут вместо ответа
+            self._forget_wait(username, fut)
+            raise
+        try:
+            return await asyncio.wait_for(fut, timeout)
+        except asyncio.TimeoutError:
+            self._forget_wait(username, fut)
+            return None
+
     async def _send_and_wait(self, username: str, text: str, timeout: int = 25, throttle: bool = True):
         # Лок на бота держим ВЕСЬ круг «отправил -> получил ответ»: несколько циклов
         # (карточки/майнинг/контейнеры/такс/ручной перевод) ходят в ОДНОГО бота
@@ -398,23 +424,25 @@ class _WorkerBase:
         # своё ожидание раньше нашего и перехватить наш же ответ (внешне выглядело
         # как «Ткарточка не работает» или как будто карточка распарсила ответ магазина).
         async with self._lock_for_bot(username):
-            if throttle:
-                await asyncio.sleep(ACTION_DELAY)
-            fut = self._register_wait(username)
-            try:
-                await self.client.send_message(username, text)
-            except Exception:
-                # send_message сам бросил (FloodWait/сеть/PeerIdInvalid) — future уже
-                # зарегистрирован в _pending, но ответа на него никогда не будет; без
-                # этой чистки следующий РЕАЛЬНЫЙ ответ бота (FIFO) доставался бы этому
-                # мёртвому future, а настоящий вызов ловил бы таймаут вместо ответа
-                self._forget_wait(username, fut)
-                raise
-            try:
-                return await asyncio.wait_for(fut, timeout)
-            except asyncio.TimeoutError:
-                self._forget_wait(username, fut)
-                return None
+            return await self._send_locked(username, text, timeout, throttle)
+
+    async def _click_locked(self, message, button_text: str, bot: str, timeout: int = 12):
+        """Как _click_and_wait, но БЕЗ собственного лока — см. _send_locked.
+        Возвращает result или None (в отличие от _click_and_wait — БЕЗ отдельного
+        флага clicked, т.к. многошаговые locked-флоу и так прерываются на None)."""
+        # Регистрируем ожидание ДО клика (не после) — иначе если ответ бота
+        # прилетает, пока мы ещё внутри await message.click(...), _on_message
+        # не находит очередь на этот username и молча теряет сообщение
+        fut = self._register_wait(bot)
+        clicked = await self._try_click(message, button_text)
+        if not clicked:
+            self._forget_wait(bot, fut)
+            return None
+        try:
+            return await asyncio.wait_for(fut, timeout)
+        except asyncio.TimeoutError:
+            self._forget_wait(bot, fut)
+            return None
 
     async def _click_and_wait(
         self, message, button_text: str, bot: str, timeout: int = 12,
@@ -425,10 +453,6 @@ class _WorkerBase:
         клик. Возвращает (clicked, result); result is None — клик прошёл, но бот не
         ответил за timeout."""
         async with self._lock_for_bot(bot):
-            # Регистрируем ожидание ДО клика (не после) — иначе если ответ бота
-            # прилетает, пока мы ещё внутри await message.click(...), _on_message
-            # не находит очередь на этот username и молча теряет сообщение (вызывающий
-            # код достаивает полный timeout впустую, хотя ответ уже пришёл и потерян)
             fut = self._register_wait(bot)
             clicked = await self._try_click(message, button_text)
             if not clicked:
