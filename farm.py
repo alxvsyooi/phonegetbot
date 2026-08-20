@@ -109,6 +109,33 @@ def parse_pcoin_wallet(text: str | None) -> float | None:
         return None
 
 
+# Маркеры экранов биржи P-Coin (см. dump_pcoins_now/_send_pcoins) — подстроки
+# в нижнем регистре, снятые с РЕАЛЬНЫХ ответов игры (владелец прислал живые
+# скриншоты всего флоу — продажа и перевод). Строгая проверка «это точно тот
+# экран, которого мы ждём» ДО того, как парсить его/кликать по нему дальше —
+# без этого код мог принять залетевший чужой ответ (репорт: панель фермы
+# вместо экрана биржи, см. _notify_owner_exchange_unexpected) или ПРОМЕЖУТОЧНОЕ
+# статус-сообщение («Исполняю ордер...»/«Обработка перевода...» — бот шлёт их
+# ДО настоящего результата) за финальный ответ.
+_PCOIN_ROOT_MARKER = "биржа p-coin"
+_PCOIN_SELL_ASK_QTY_MARKER = "хотите продать"
+_PCOIN_SELL_ORDER_MARKER = "ордер на продажу"
+_PCOIN_SELL_DONE_MARKER = "ордер исполнен"  # бот шлёт «исполняю ордер...» ДО этого — см. dump_pcoins_now
+_PCOIN_SEND_ASK_TARGET_MARKER = "отправка p-coins"
+_PCOIN_SEND_ASK_QTY_MARKER = "введите количество p-coins"
+_PCOIN_SEND_ASK_COMMENT_MARKER = "введите комментарий"
+# «Вы уверены, что хотите выполнить перевод?» — не «подтверждение перевода»
+# (заголовок экрана в игре — либо опечатка «ПОДТВЕРДЕНИЕ» без «ж», либо просто
+# не разобрал буквы на скрине; «уверены» надёжнее, не завязано на возможную
+# опечатку в заголовке)
+_PCOIN_SEND_CONFIRM_MARKER = "уверены"
+_PCOIN_SEND_DONE_MARKER = "успешно отправили"  # бот шлёт «обработка перевода...» ДО этого — см. _send_pcoins
+
+
+def _screen_is(msg, marker: str) -> bool:
+    return marker in _msg_text(msg).lower()
+
+
 # после обновления игры у фермы появился персистентный тумблер вкл/выкл
 # («Состояние: ▶️ Включена»/«⏸ Выключена» + кнопка «Выключить»/«Включить») — по
 # умолчанию НОВАЯ ферма выключена и не майнит, пока её не включат вручную.
@@ -1265,21 +1292,30 @@ class FarmModule:
     async def dump_pcoins_now(self) -> str:
         """💱 Продаёт P-Coins из кошелька на бирже («/texchange») за ТОчки по
         рыночному курсу (комиссия ~5%, это условие самой игры, не баг). Флоу
-        (проверено вживую): открыть биржу -> клик «Продать» -> бот просит
-        ОТВЕТИТЬ ЧИСЛОМ прямо в чат (не кнопка!) -> экран «ОРДЕР НА ПРОДАЖУ
-        (MARKET)» -> клик «Подтвердить ордер». Продаёт весь кошелёк (сколько
-        P-Coins накопилось после «Снять P-Coins с фермы» — см. collect_mining).
-        Используется циклом (тумблер pcoin_exchange_enabled) и кнопкой «💱
-        Проверить биржу сейчас».
+        (проверено вживую, реальные тексты экранов — см. _PCOIN_SELL_*_MARKER):
+        открыть биржу -> клик «Продать» -> бот просит ОТВЕТИТЬ ЧИСЛОМ прямо в
+        чат (не кнопка!) -> экран «ОРДЕР НА ПРОДАЖУ (MARKET)» -> клик
+        «Подтвердить ордер» -> промежуточное «Исполняю ордер...» -> «Ордер
+        исполнен!». Продаёт весь кошелёк (сколько P-Coins накопилось после
+        «Снять P-Coins с фермы» — см. collect_mining). Используется циклом
+        (тумблер pcoin_exchange_enabled) и кнопкой «💱 Проверить биржу сейчас».
 
         Весь флоу — ПОД ОДНИМ непрерывным локом бота (см. _send_locked/
         _click_locked в automation.py), а не отдельным локом на каждый шаг:
-        раньше между шагами (после открытия биржи, после клика «Продать» и
-        т.д.) лок отпускался, и параллельный цикл ЭТОГО ЖЕ аккаунта (карточки/
-        майнинг/etc.) мог встрять своим сообщением боту прямо посреди диалога
-        «сколько продать» — похоже, именно так игра теряла введённое
-        количество и откатывалась к минимуму (репорт: автосброс продаёт
-        1 P-Coin вместо всего кошелька)."""
+        раньше между шагами лок отпускался, и параллельный цикл ЭТОГО ЖЕ
+        аккаунта мог встрять своим сообщением посреди диалога «сколько
+        продать» — похоже, именно так игра теряла введённое количество и
+        откатывалась к минимуму (репорт: автосброс продаёт 1 P-Coin вместо
+        всего кошелька).
+
+        КАЖДЫЙ шаг дополнительно проверяется на СОДЕРЖАНИЕ (не только «есть
+        ли ответ») — сравнением с реальным текстом каждого экрана, который
+        владелец прислал вживую: залетевшее чужое сообщение (напр. панель
+        фермы вместо биржи, см. _notify_owner_exchange_unexpected) теперь не
+        принимается за нужный экран молча. Финальный шаг ждёт именно «Ордер
+        исполнен!», а не первый попавшийся ответ — бот шлёт промежуточное
+        «Исполняю ордер...» ДО настоящего результата, и раньше этот статус
+        мог быть ошибочно принят за завершённую продажу."""
         if not self.client or not self.running:
             self.last_pcoin_exchange = "аккаунт не запущен"
             return self.last_pcoin_exchange
@@ -1294,6 +1330,10 @@ class FarmModule:
                 root = await self._send_locked(bot, open_cmd, timeout=15)
                 if root is None:
                     self.last_pcoin_exchange = f"⚠️ биржа ({open_cmd}) не отвечает ({clock()})"
+                    return self.last_pcoin_exchange
+                if not _screen_is(root, _PCOIN_ROOT_MARKER):
+                    self.last_pcoin_exchange = f"⚠️ ответ на «{open_cmd}» — не экран биржи ({clock()})"
+                    await self._notify_owner_exchange_unexpected(_msg_text(root))
                     return self.last_pcoin_exchange
 
                 wallet = parse_pcoin_wallet(_msg_text(root))
@@ -1314,6 +1354,10 @@ class FarmModule:
                 if ask_qty is None:
                     self.last_pcoin_exchange = f"⚠️ нет ответа на «продать» ({clock()})"
                     return self.last_pcoin_exchange
+                if not _screen_is(ask_qty, _PCOIN_SELL_ASK_QTY_MARKER):
+                    self.last_pcoin_exchange = f"⚠️ ответ на «продать» — не экран ввода количества ({clock()})"
+                    await self._notify_owner_exchange_unexpected(_msg_text(ask_qty))
+                    return self.last_pcoin_exchange
 
                 # бот просит количество ОТВЕТОМ В ЧАТ, а не кнопкой — это ожидаемый шаг
                 # флоу самой игры (проверено вживую), не «текст посреди навигации»
@@ -1321,12 +1365,17 @@ class FarmModule:
                 if order is None:
                     self.last_pcoin_exchange = f"⚠️ нет ответа на количество «{qty}» ({clock()})"
                     return self.last_pcoin_exchange
+                if not _screen_is(order, _PCOIN_SELL_ORDER_MARKER):
+                    self.last_pcoin_exchange = f"⚠️ ответ на количество — не экран ордера ({clock()})"
+                    await self._notify_owner_exchange_unexpected(_msg_text(order))
+                    return self.last_pcoin_exchange
                 confirm_btn = _find_button(order, cfg.get("confirm_button", "подтвердить ордер"))
                 if not confirm_btn:
                     self.last_pcoin_exchange = f"⚠️ нет кнопки подтверждения ордера ({clock()})"
                     await self._notify_owner_exchange_unexpected(_msg_text(order))
                     return self.last_pcoin_exchange
-                done = await self._click_locked(order, confirm_btn, bot, timeout=15)
+                done = await self._click_and_wait_for_text_locked(
+                    order, confirm_btn, bot, lambda m: _screen_is(m, _PCOIN_SELL_DONE_MARKER), timeout=15)
                 if done is None:
                     self.last_pcoin_exchange = f"⚠️ ордер продажи не подтвердился ({clock()})"
                     return self.last_pcoin_exchange
@@ -1372,17 +1421,20 @@ class FarmModule:
     async def _send_pcoins(self, target: str) -> str:
         """Общая часть send_pcoins_now()/send_pcoins_to_now() — переводит ВЕСЬ
         кошелёк P-Coins явно заданному получателю через биржу («/texchange» ->
-        «Отправить P-Coins»). Флоу (проверено вживую): открыть биржу -> «Отправить
-        P-Coins» -> ответить получателем (@username/id) ТЕКСТОМ -> ответить
-        количеством ТЕКСТОМ -> «Пропустить» комментарий -> «Подтвердить» перевод.
-        Отдельного сообщения об успехе нет — то же сообщение просто редактируется
-        обратно в «Биржа P-Coin» с уменьшенным балансом (баланс здесь не
-        перепроверяем повторно текстом — см. общий баг-паттерн этого бота:
-        текстовая команда посреди навигации сбрасывает диалог).
+        «Отправить P-Coins»). Флоу (проверено вживую, реальные тексты экранов
+        — см. _PCOIN_SEND_*_MARKER): открыть биржу -> «Отправить P-Coins» ->
+        ответить получателем (@username/id) ТЕКСТОМ -> ответить количеством
+        ТЕКСТОМ -> «Пропустить» комментарий -> «Подтвердить» перевод ->
+        промежуточное «Обработка перевода...» -> «Вы успешно отправили...».
 
         Весь флоу — ПОД ОДНИМ непрерывным локом бота (см. dump_pcoins_now —
         та же причина: без этого параллельный цикл того же аккаунта мог
-        встрять своим сообщением посреди многошагового диалога с биржей)."""
+        встрять своим сообщением посреди многошагового диалога с биржей).
+
+        КАЖДЫЙ шаг дополнительно проверяется на СОДЕРЖАНИЕ, как и в
+        dump_pcoins_now (см. её докстринг) — на реальных примерах экранов от
+        владельца. Финальный шаг ждёт именно «Вы успешно отправили», а не
+        первый попавшийся ответ (промежуточное «Обработка перевода...»)."""
         cfg = self.exchange_cfg
         bot = cfg.get("bot") or CARDS_BOT
         open_cmd = cfg.get("open_command") or EXCHANGE_WORD
@@ -1391,6 +1443,10 @@ class FarmModule:
                 root = await self._send_locked(bot, open_cmd, timeout=15)
                 if root is None:
                     self.last_pcoin_exchange = f"⚠️ биржа ({open_cmd}) не отвечает ({clock()})"
+                    return self.last_pcoin_exchange
+                if not _screen_is(root, _PCOIN_ROOT_MARKER):
+                    self.last_pcoin_exchange = f"⚠️ ответ на «{open_cmd}» — не экран биржи ({clock()})"
+                    await self._notify_owner_exchange_unexpected(_msg_text(root))
                     return self.last_pcoin_exchange
 
                 wallet = parse_pcoin_wallet(_msg_text(root))
@@ -1411,6 +1467,10 @@ class FarmModule:
                 if ask_target is None:
                     self.last_pcoin_exchange = f"⚠️ нет ответа на «отправить P-Coins» ({clock()})"
                     return self.last_pcoin_exchange
+                if not _screen_is(ask_target, _PCOIN_SEND_ASK_TARGET_MARKER):
+                    self.last_pcoin_exchange = f"⚠️ ответ на «отправить P-Coins» — не тот экран ({clock()})"
+                    await self._notify_owner_exchange_unexpected(_msg_text(ask_target))
+                    return self.last_pcoin_exchange
 
                 raw = target.lstrip("@")
                 target_norm = raw if raw.isdigit() else f"@{raw}"
@@ -1422,10 +1482,18 @@ class FarmModule:
                 if not_found_marker in _msg_text(ask_qty).lower():
                     self.last_pcoin_exchange = f"⚠️ получатель «{target_norm}» не найден игрой ({clock()})"
                     return self.last_pcoin_exchange
+                if not _screen_is(ask_qty, _PCOIN_SEND_ASK_QTY_MARKER):
+                    self.last_pcoin_exchange = f"⚠️ ответ на получателя — не экран ввода количества ({clock()})"
+                    await self._notify_owner_exchange_unexpected(_msg_text(ask_qty))
+                    return self.last_pcoin_exchange
 
                 ask_comment = await self._send_locked(bot, str(qty), timeout=15)
                 if ask_comment is None:
                     self.last_pcoin_exchange = f"⚠️ нет ответа на количество «{qty}» ({clock()})"
+                    return self.last_pcoin_exchange
+                if not _screen_is(ask_comment, _PCOIN_SEND_ASK_COMMENT_MARKER):
+                    self.last_pcoin_exchange = f"⚠️ ответ на количество — не экран комментария ({clock()})"
+                    await self._notify_owner_exchange_unexpected(_msg_text(ask_comment))
                     return self.last_pcoin_exchange
 
                 skip_btn = _find_button(ask_comment, cfg.get("skip_comment_button", "пропустить"))
@@ -1435,13 +1503,19 @@ class FarmModule:
                 if confirm_screen is None:
                     self.last_pcoin_exchange = f"⚠️ нет экрана подтверждения перевода ({clock()})"
                     return self.last_pcoin_exchange
+                if not _screen_is(confirm_screen, _PCOIN_SEND_CONFIRM_MARKER):
+                    self.last_pcoin_exchange = f"⚠️ ответ после комментария — не экран подтверждения ({clock()})"
+                    await self._notify_owner_exchange_unexpected(_msg_text(confirm_screen))
+                    return self.last_pcoin_exchange
 
                 confirm_btn = _find_button(confirm_screen, cfg.get("transfer_confirm_button", "подтвердить"))
                 if not confirm_btn:
                     self.last_pcoin_exchange = f"⚠️ нет кнопки подтверждения перевода ({clock()})"
                     await self._notify_owner_exchange_unexpected(_msg_text(confirm_screen))
                     return self.last_pcoin_exchange
-                done = await self._click_locked(confirm_screen, confirm_btn, bot, timeout=15)
+                done = await self._click_and_wait_for_text_locked(
+                    confirm_screen, confirm_btn, bot,
+                    lambda m: _screen_is(m, _PCOIN_SEND_DONE_MARKER), timeout=15)
                 if done is None:
                     self.last_pcoin_exchange = f"⚠️ перевод не подтвердился ({clock()})"
                     return self.last_pcoin_exchange
