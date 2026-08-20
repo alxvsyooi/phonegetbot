@@ -536,6 +536,42 @@ class _WorkerBase:
                 return False, msg  # другой экран с другими кнопками — не промежуточное сообщение
         return False, msg
 
+    async def _click_and_wait_for_text_locked(
+        self, message, button_text: str, bot: str, is_final,
+        timeout: int = 15, extra_waits: int = 2,
+    ):
+        """Как _click_and_wait_for_button_locked, но ждёт не кнопку, а сообщение,
+        для которого is_final(текст_сообщения) вернул True — для промежуточных
+        статус-сообщений вида «Исполняю ордер...»/«Обработка перевода...» перед
+        настоящим результатом (обнаружено вживую на бирже P-Coin — см.
+        farm.py.dump_pcoins_now/_send_pcoins): без этого код мог принять
+        промежуточное сообщение за финальный ответ и посчитать операцию
+        успешной, не дождавшись реального подтверждения. БЕЗ собственного
+        лока — вызывающий уже должен держать _lock_for_bot(bot) сам.
+        Возвращает финальное сообщение или None (клик не прошёл/не дождались
+        сообщения, для которого is_final вернул True, за extra_waits попыток)."""
+        fut = self._register_wait(bot)
+        clicked = await self._try_click(message, button_text)
+        if not clicked:
+            self._forget_wait(bot, fut)
+            return None
+        retry_timeout = max(3, timeout // 3)
+        msg = None
+        for i in range(1 + max(0, extra_waits)):
+            if i > 0:
+                fut = self._register_wait(bot)
+            try:
+                msg = await asyncio.wait_for(fut, timeout if i == 0 else retry_timeout)
+            except asyncio.TimeoutError:
+                self._forget_wait(bot, fut)
+                return None
+            try:
+                if is_final(msg):
+                    return msg
+            except Exception:
+                return None
+        return None
+
     # ---------- клик с повтором, если бот просто не спешит с ответом ----------
     async def _click_retry(self, message, button_text: str, bot: str, cfg: dict, timeout: int = 15):
         """Как _click_and_wait, но повторяет клик (не долбит наугад — тот же клик по
